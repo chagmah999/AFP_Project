@@ -1,103 +1,182 @@
+# afp_app/signal_factor_premia.py
+
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
+
 from sklearn.linear_model import Ridge, Lasso
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error
-import warnings
-warnings.filterwarnings('ignore')
+
 
 class FactorPremiaForecaster:
     """
-    Forecast expected factor premia using macro variables.
-    Trains simple models and supports walk-forward validation + one-step forecast.
+    Forecast expected factor premia using macro variables and lagged factor returns.
+
+    - For each factor (VALUE, QUALITY, MOMENTUM, LOW_VOL), we:
+        * Build features: macro variables + lagged factor premiums
+        * Build targets: forward H-day average factor premiums
+        * Train an ensemble of models (Ridge, Lasso, Random Forest)
+        * Evaluate in walk-forward mode and store metrics (RMSE, MAE, hit rate)
+        * Produce an ensemble forecast and feature importances
     """
 
     def __init__(self, lookback_window: int = 252, forecast_horizon: int = 21):
         self.lookback_window = lookback_window
         self.forecast_horizon = forecast_horizon
-        self.models = {}             # factor -> {ridge, lasso, random_forest}
-        self.scalers = {}            # factor -> StandardScaler
-        self.feature_importance = {} # factor -> DataFrame(feature, ridge_coef, lasso_coef, rf_importance)
 
-        # NEW: cache to ensure scenarios reuse the exact same feature vector & order
-        self.latest_feature_row = {}  # factor -> pd.Series (unscaled, in training feature order)
-        self.feature_order = {}       # factor -> list[str]
+        self.models: dict[str, dict] = {}
+        self.scalers: dict[str, StandardScaler] = {}
+        self.feature_importance: dict[str, pd.DataFrame] = {}
+        self.validation_summary: dict[str, dict] = {}
 
-    def prepare_features_targets(self, data: pd.DataFrame, target_factor: str):
+    # ------------------------------------------------------------------
+    # Feature / target construction
+    # ------------------------------------------------------------------
+    def prepare_features_targets(
+        self,
+        data: pd.DataFrame,
+        target_factor: str,
+    ) -> tuple[pd.DataFrame, pd.Series, list[str]]:
         """
-        Build X (features) and y (forward target) for a given factor.
+        Build the feature matrix X and target vector y for a given factor.
+
+        Features include:
+          - Macro variables (rates, curves, credit, VIX)
+          - Lagged factor returns (1, 5, 21, 63 days)
+
+        Target:
+          - Forward H-day average factor premium:
+                y_{t} = (1/H) * sum_{k=1..H} fp_{t+k}
+            implemented as: shift(-H).rolling(H).mean()
         """
+        H = self.forecast_horizon
+        df = data.copy()
+
+        # Macro features
         macro_features = [
-            'rates_level', 'rates_1m_change', 'term_spread_10y2y', 'term_spread_10y3m',
-            'vix_close', 'vix_percentile', 'credit_spread_level', 'credit_spread_1m_change'
+            "rates_level",
+            "rates_1m_change",
+            "term_spread_10y2y",
+            "term_spread_10y3m",
+            "vix_close",
+            "vix_percentile",
+            "credit_spread_level",
+            "credit_spread_1m_change",
         ]
 
-        # Add lagged target returns as features if present
-        for lag in [1, 5, 21, 63]:
-            if target_factor in data.columns:
-                data[f'{target_factor}_lag{lag}'] = data[target_factor].shift(lag)
-                macro_features.append(f'{target_factor}_lag{lag}')
+        # Lagged factor returns as features
+        if target_factor in df.columns:
+            for lag in [1, 5, 21, 63]:
+                col = f"{target_factor}_lag{lag}"
+                df[col] = df[target_factor].shift(lag)
+                macro_features.append(col)
 
-        # Keep only available cols
-        features = [f for f in macro_features if f in data.columns]
-
-        # Forward average over the horizon
-        if target_factor in data.columns:
-            data[f'{target_factor}_forward'] = (
-                data[target_factor].shift(-self.forecast_horizon)
-                                   .rolling(self.forecast_horizon).mean()
-            )
+            # Forward H-day average of factor premium (realized forward premium)
+            fwd_col = f"{target_factor}_forward"
+            df[fwd_col] = df[target_factor].shift(-H).rolling(H).mean()
         else:
-            data[f'{target_factor}_forward'] = np.nan  # fallback; you can synthesize if needed
+            # If factor column is missing, create a dummy target
+            fwd_col = f"{target_factor}_forward"
+            df[fwd_col] = np.nan
 
-        valid = data[features + [f'{target_factor}_forward']].dropna()
-        X = valid[features]
-        y = valid[f'{target_factor}_forward']
+        # Restrict to columns that actually exist
+        feature_cols = [c for c in macro_features if c in df.columns]
 
-        return X, y, features
+        # Drop rows with missing values in features or target
+        valid = df[feature_cols + [fwd_col]].dropna()
+        if valid.empty:
+            return pd.DataFrame(), pd.Series(dtype=float), feature_cols
 
-    def train_models(self, X_train, y_train, factor_name: str):
+        X = valid[feature_cols]
+        y = valid[fwd_col]
+
+        return X, y, feature_cols
+
+    # ------------------------------------------------------------------
+    # Model training
+    # ------------------------------------------------------------------
+    def train_models(
+        self,
+        X_train: pd.DataFrame,
+        y_train: pd.Series,
+        factor_name: str,
+    ) -> dict[str, object]:
+        """
+        Train Ridge, Lasso, and Random Forest models on standardized features.
+        Store models, scaler, and feature importance for later use.
+        """
         scaler = StandardScaler()
-        Xs = scaler.fit_transform(X_train)
+        X_scaled = scaler.fit_transform(X_train)
         self.scalers[factor_name] = scaler
 
-        ridge = Ridge(alpha=1.0, random_state=42)
-        ridge.fit(Xs, y_train)
+        # Ridge regression
+        ridge = Ridge(alpha=1.0)
+        ridge.fit(X_scaled, y_train)
 
-        lasso = Lasso(alpha=0.001, random_state=42)
-        lasso.fit(Xs, y_train)
+        # Lasso regression
+        lasso = Lasso(alpha=0.001)
+        lasso.fit(X_scaled, y_train)
 
-        rf = RandomForestRegressor(n_estimators=100, max_depth=5, random_state=42)
-        rf.fit(Xs, y_train)
+        # Random Forest
+        rf = RandomForestRegressor(
+            n_estimators=100,
+            max_depth=5,
+            random_state=42,
+        )
+        rf.fit(X_scaled, y_train)
 
-        self.models[factor_name] = {'ridge': ridge, 'lasso': lasso, 'random_forest': rf}
-        self.feature_importance[factor_name] = pd.DataFrame({
-            'feature': X_train.columns,
-            'ridge_coef': np.abs(getattr(ridge, 'coef_', np.zeros(X_train.shape[1]))),
-            'lasso_coef': np.abs(getattr(lasso, 'coef_', np.zeros(X_train.shape[1]))),
-            'rf_importance': getattr(rf, 'feature_importances_', np.zeros(X_train.shape[1]))
-        }).sort_values('rf_importance', ascending=False)
+        self.models[factor_name] = {
+            "ridge": ridge,
+            "lasso": lasso,
+            "random_forest": rf,
+        }
+
+        # Store feature importance frame
+        self.feature_importance[factor_name] = pd.DataFrame(
+            {
+                "feature": X_train.columns,
+                "ridge_coef": np.abs(ridge.coef_),
+                "lasso_coef": np.abs(lasso.coef_),
+                "rf_importance": rf.feature_importances_,
+            }
+        ).sort_values("rf_importance", ascending=False)
+
         return self.models[factor_name]
 
-    def walk_forward_validation(self, data: pd.DataFrame, target_factor: str):
+    # ------------------------------------------------------------------
+    # Walk-forward validation (with hit rate)
+    # ------------------------------------------------------------------
+    def walk_forward_validation(
+        self,
+        data: pd.DataFrame,
+        target_factor: str,
+    ) -> pd.DataFrame | None:
         """
         Perform walk-forward validation and store summary metrics:
-        - average RMSE, MAE, hit rate across folds
+          - average RMSE, MAE, hit rate across folds (for ensemble)
         Also returns a DataFrame of fold-level results.
+
+        Direction hit rate is:
+            mean( sign(pred) == sign(actual) )
+        which measures how often the model gets the sign of the forward
+        factor premium correct.
         """
         print(f"\nWalk-forward validation for {target_factor}...")
 
         X, y, features = self.prepare_features_targets(data, target_factor)
-
-        if len(X) < self.lookback_window + self.forecast_horizon:
-            print(f"Insufficient data for walk-forward validation")
+        if X.empty or y.empty:
+            print(f"No data for factor {target_factor}")
             return None
 
-        # Split points for walk-forward
+        if len(X) < self.lookback_window + self.forecast_horizon:
+            print("Insufficient data for walk-forward validation")
+            return None
+
         n_splits = 5
         test_size = len(X) // (n_splits + 1)
-
         results = []
 
         for i in range(n_splits):
@@ -112,103 +191,156 @@ class FactorPremiaForecaster:
             if len(X_train) < 50 or len(X_test) < 10:
                 continue
 
-            # Train models
+            # Train models on this fold
             self.train_models(X_train, y_train, target_factor)
 
-            # Make predictions
+            # Predict on test
             X_test_scaled = self.scalers[target_factor].transform(X_test)
-
             predictions = {}
-            for model_name, model in self.models[target_factor].items():
-                pred = model.predict(X_test_scaled)
-                predictions[model_name] = pred
+            for name, mdl in self.models[target_factor].items():
+                predictions[name] = mdl.predict(X_test_scaled)
 
             # Ensemble prediction (simple average)
             ensemble_pred = np.mean(list(predictions.values()), axis=0)
 
-            # Fold level metrics
-            fold_results = {
+            # Fold metrics
+            fold = {
                 "factor": target_factor,
                 "fold": i,
                 "n_test": len(y_test),
-                "test_start": data.iloc[train_end]["date"] if "date" in data.columns else train_end,
-                "test_end": data.iloc[test_end - 1]["date"] if "date" in data.columns else test_end,
+                "test_start": (
+                    data.iloc[train_end]["date"]
+                    if "date" in data.columns
+                    else train_end
+                ),
+                "test_end": (
+                    data.iloc[test_end - 1]["date"]
+                    if "date" in data.columns
+                    else test_end
+                ),
             }
 
-            # Metrics for each model (RMSE, MAE, hit rate)
-            for model_name, pred in predictions.items():
-                fold_results[f"{model_name}_rmse"] = float(np.sqrt(mean_squared_error(y_test, pred)))
-                fold_results[f"{model_name}_mae"] = float(mean_absolute_error(y_test, pred))
-                fold_results[f"{model_name}_hit"] = float(np.mean(np.sign(pred) == np.sign(y_test)))
+            # Model-specific metrics
+            for name, pred in predictions.items():
+                fold[f"{name}_rmse"] = float(
+                    np.sqrt(mean_squared_error(y_test, pred))
+                )
+                fold[f"{name}_mae"] = float(
+                    mean_absolute_error(y_test, pred)
+                )
+                fold[f"{name}_hit"] = float(
+                    np.mean(np.sign(pred) == np.sign(y_test))
+                )
 
             # Ensemble metrics
-            fold_results["ensemble_rmse"] = float(np.sqrt(mean_squared_error(y_test, ensemble_pred)))
-            fold_results["ensemble_mae"] = float(mean_absolute_error(y_test, ensemble_pred))
-            fold_results["ensemble_hit"] = float(np.mean(np.sign(ensemble_pred) == np.sign(y_test)))
+            fold["ensemble_rmse"] = float(
+                np.sqrt(mean_squared_error(y_test, ensemble_pred))
+            )
+            fold["ensemble_mae"] = float(
+                mean_absolute_error(y_test, ensemble_pred)
+            )
+            fold["ensemble_hit"] = float(
+                np.mean(np.sign(ensemble_pred) == np.sign(y_test))
+            )
 
-            results.append(fold_results)
+            results.append(fold)
 
         if not results:
             return None
 
         results_df = pd.DataFrame(results)
 
-        # Summary statistics (store for later retrieval in the app)
+        # Store per-factor validation summary
         summary = {
             "factor": target_factor,
-            "ensemble_rmse": results_df["ensemble_rmse"].mean(),
-            "ensemble_mae": results_df["ensemble_mae"].mean(),
-            "ensemble_hit_rate": results_df["ensemble_hit"].mean(),
+            "ensemble_rmse": float(results_df["ensemble_rmse"].mean()),
+            "ensemble_mae": float(results_df["ensemble_mae"].mean()),
+            "ensemble_hit_rate": float(results_df["ensemble_hit"].mean()),
         }
-
-        # Keep a per factor summary dictionary on the object
-        if not hasattr(self, "validation_summary"):
-            self.validation_summary = {}
         self.validation_summary[target_factor] = summary
 
-        print(f"\n{target_factor} Validation Results:")
+        print(f"\n{target_factor} Validation Results")
         print("=" * 50)
         print(f"Average Ensemble RMSE: {summary['ensemble_rmse']:.4f}")
-        print(f"Average Ensemble MAE: {summary['ensemble_mae']:.4f}")
-        print(f"Average Ensemble Hit Rate: {summary['ensemble_hit_rate']:.2%}")
+        print(f"Average Ensemble MAE : {summary['ensemble_mae']:.4f}")
+        print(f"Average Ensemble Hit : {summary['ensemble_hit_rate']:.2%}")
 
         return results_df
 
+    # ------------------------------------------------------------------
+    # Forecast next period
+    # ------------------------------------------------------------------
+    def forecast_next(
+        self,
+        data: pd.DataFrame,
+        target_factor: str,
+    ) -> dict | None:
+        """
+        Train on all available data and produce a forecast for the next
+        H-day factor premium (average), plus feature importances.
 
-    def forecast_next(self, data: pd.DataFrame, target_factor: str):
+        Returns a dict with:
+            - factor
+            - forecast_horizon_days
+            - ensemble_forecast
+            - model_forecasts
+            - top_drivers
+            - forecast_date
+            - confidence (qualitative)
         """
-        Train on all available data and predict the next-period ER.
-        Also caches the *exact* feature vector and ordering used, so scenarios with zero shocks will match.
-        """
-        X, y, feats = self.prepare_features_targets(data.copy(), target_factor)
-        if len(X) < max(50, self.lookback_window // 2):
+        X, y, features = self.prepare_features_targets(data, target_factor)
+        if X.empty or y.empty:
             return None
 
-        # Train on full set
+        if len(X) < self.lookback_window:
+            print(f"[{target_factor}] Not enough data to forecast")
+            return None
+
+        # Train on all available rows
         self.train_models(X, y, target_factor)
 
-        # Latest feature row (unscaled) in training order; cache it for scenarios
-        x = X.iloc[-1].copy()
-        self.feature_order[target_factor] = list(X.columns)
-        self.latest_feature_row[target_factor] = x.copy()
+        # Latest feature row
+        X_latest = X.iloc[-1:].values
+        scaler = self.scalers[target_factor]
+        X_scaled = scaler.transform(X_latest)
 
-        # Predict ensemble
-        Xs = self.scalers[target_factor].transform(x.values.reshape(1, -1))
-        preds = {name: float(mdl.predict(Xs)[0]) for name, mdl in self.models[target_factor].items()}
+        preds = {}
+        for name, mdl in self.models[target_factor].items():
+            preds[name] = float(mdl.predict(X_scaled)[0])
+
         ensemble = float(np.mean(list(preds.values())))
 
-        # Drivers
-        drivers = self.feature_importance.get(target_factor, pd.DataFrame())
+        # Top drivers from stored feature importance
+        drivers = self.feature_importance.get(target_factor, None)
         top = []
-        if not drivers.empty:
-            top = drivers.sort_values('rf_importance', ascending=False).head(5)[['feature', 'rf_importance']].to_dict('records')
+        if drivers is not None and not drivers.empty:
+            top = (
+                drivers.sort_values("rf_importance", ascending=False)
+                .head(10)[["feature", "rf_importance"]]
+                .to_dict("records")
+            )
 
-        return {
-            'factor': target_factor,
-            'forecast_horizon_days': self.forecast_horizon,
-            'ensemble_forecast': ensemble,
-            'model_forecasts': preds,
-            'top_drivers': top,
-            'forecast_date': data['date'].iloc[-1] if 'date' in data.columns else 'latest',
-            'confidence': 'Medium'
+        # Simple confidence heuristic based on random forest importance norm
+        coef_norm = float(
+            np.linalg.norm(drivers["rf_importance"].values)
+        ) if drivers is not None else 0.0
+        if coef_norm > 0.5:
+            conf = "High"
+        elif coef_norm > 0.2:
+            conf = "Medium"
+        else:
+            conf = "Low"
+
+        forecast = {
+            "factor": target_factor,
+            "forecast_horizon_days": self.forecast_horizon,
+            "ensemble_forecast": ensemble,
+            "model_forecasts": preds,
+            "top_drivers": top,
+            "forecast_date": (
+                data["date"].iloc[-1] if "date" in data.columns else "latest"
+            ),
+            "confidence": conf,
         }
+
+        return forecast
