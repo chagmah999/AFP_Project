@@ -377,13 +377,41 @@ if st.session_state.pipeline_ready:
     else:
         st.info("No alpha predictions available.")
 
-    # Stress regime
     st.subheader("Stress regime")
-    stress_fc = st.session_state.stress_fc
+
     if stress_fc:
-        st.write(
-            f"Regime: **{stress_fc['regime']}**  |  Stress probability: **{stress_fc['stress_probability']*100:.1f}%**"
+        # Base line with regime and current stress probability
+        line = (
+            f"Regime: **{stress_fc['regime']}**  |  "
+            f"Stress probability: **{stress_fc['stress_probability']*100:.1f}%**"
         )
+
+        # Append model quality (AUC) and historical stress frequency if available
+        auc = getattr(stress, "cv_auc_mean", None)
+        share = getattr(stress, "stress_share", None)
+        if auc is not None:
+            line += f"  |  Model AUC: **{auc:.3f}**"
+        if share is not None:
+            line += f"  |  Historical stress frequency: **{share*100:.1f}%**"
+
+        st.write(line)
+
+        # Optionally display key indicators if present in the forecast dict
+        key_ind = stress_fc.get("key_indicators", {})
+        if key_ind:
+            st.markdown("Key indicators at latest date:")
+            rows = []
+            for k, v in key_ind.items():
+                rows.append({"Indicator": k, "Value": v})
+            if rows:
+                df_ind = pd.DataFrame(rows)
+                st.dataframe(
+                    df_ind.style.format({"Value": "{:.3f}"}),
+                    use_container_width=True,
+                )
+
+    else:
+        st.info("No stress regime forecast available.")
 
     # Integrated recommendations
     st.subheader("Integrated recommendations")
