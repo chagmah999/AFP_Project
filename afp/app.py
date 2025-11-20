@@ -463,7 +463,8 @@ if forecasts and modeling is not None and forecaster and stress:
     with col_reset:
         if st.button("Reset shocks to 0"):
             _reset_sensitivity()
-            st.experimental_rerun()
+            st.rerun()
+
     with col_run:
         run_scen_btn = st.button("Run sensitivity scenario")
 
