@@ -4,8 +4,11 @@ from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.model_selection import cross_val_score
 from sklearn.preprocessing import StandardScaler
 
+
 class StressProbabilityModel:
-    def __init__(self, threshold_drawdown: float = -0.05, threshold_vol_spike: float = 1.5):
+    def __init__(
+        self, threshold_drawdown: float = -0.05, threshold_vol_spike: float = 1.5
+    ):
         self.threshold_drawdown = threshold_drawdown
         self.threshold_vol_spike = threshold_vol_spike
         self.model = None
@@ -45,20 +48,61 @@ class StressProbabilityModel:
             X["momo_21d"] = df["market_return"].rolling(21).sum()
         return X.ffill().fillna(0)
 
-    def fit(self, df: pd.DataFrame):
-        y = self.label_stress(df)
-        X = self._features(df)
-        valid = X.notna().all(axis=1) & y.notna()
-        X = X[valid]
-        y = y[valid]
+    def fit(self, data: pd.DataFrame):
+        """
+        Train the stress probability model and store:
+        - cv_auc_mean: cross validated AUC
+        - stress_share: fraction of days labeled as stress
+        """
+        print("Training stress probability model...")
+
+        # Label stress periods
+        stress_labels = self.label_stress_periods(data)
+
+        # Prepare features
+        features = self.prepare_stress_features(data)
+
+        # Remove NaN rows
+        valid_idx = features.notna().all(axis=1) & stress_labels.notna()
+        X = features[valid_idx]
+        y = stress_labels[valid_idx]
+
         if len(X) < 100:
+            print("Insufficient data for stress model training")
+            self.model = None
+            self.cv_auc_mean = None
+            self.stress_share = None
             return None
-        Xs = self.scaler.fit_transform(X)
-        clf = GradientBoostingClassifier(n_estimators=100, max_depth=3, random_state=42)
-        scores = cross_val_score(clf, Xs, y, cv=5, scoring="roc_auc")
-        clf.fit(Xs, y)
-        self.model = clf
-        return float(scores.mean())
+
+        # Scale features
+        X_scaled = self.scaler.fit_transform(X)
+
+        # Train gradient boosting classifier
+        self.model = GradientBoostingClassifier(
+            n_estimators=100, max_depth=3, random_state=42
+        )
+
+        # Cross-validation AUC
+        cv_scores = cross_val_score(self.model, X_scaled, y, cv=5, scoring="roc_auc")
+
+        # Final training
+        self.model.fit(X_scaled, y)
+
+        # Store summary metrics
+        self.cv_auc_mean = float(cv_scores.mean())
+        self.stress_share = float(y.mean())
+
+        print(f"Stress model trained. CV AUC: {self.cv_auc_mean:.3f}")
+        print(
+            f"Stress periods: {y.sum()} out of {len(y)} days ({self.stress_share*100:.1f}%)"
+        )
+
+        # Return feature importance if needed
+        feature_importance = pd.DataFrame(
+            {"feature": X.columns, "importance": self.model.feature_importances_}
+        ).sort_values("importance", ascending=False)
+
+        return feature_importance
 
     def predict(self, df: pd.DataFrame) -> dict | None:
         if self.model is None:
@@ -67,14 +111,20 @@ class StressProbabilityModel:
                 return None
         X = self._features(df).iloc[-1:].fillna(0)
         Xs = self.scaler.transform(X)
-        p = float(self.model.predict_proba(Xs)[0,1])
+        p = float(self.model.predict_proba(Xs)[0, 1])
         regime = "HIGH RISK" if p > 0.7 else ("ELEVATED" if p > 0.3 else "NORMAL")
         return {
             "stress_probability": p,
             "regime": regime,
             "key_indicators": {
-                "vix_level": float(X["vix_level"].values[0]) if "vix_level" in X else None,
-                "credit_spread": float(X["credit_level"].values[0]) if "credit_level" in X else None,
-                "market_momentum": float(X["momo_21d"].values[0]) if "momo_21d" in X else None
-            }
+                "vix_level": float(X["vix_level"].values[0])
+                if "vix_level" in X
+                else None,
+                "credit_spread": float(X["credit_level"].values[0])
+                if "credit_level" in X
+                else None,
+                "market_momentum": float(X["momo_21d"].values[0])
+                if "momo_21d" in X
+                else None,
+            },
         }
