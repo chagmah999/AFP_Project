@@ -23,29 +23,26 @@ from afp_app.signal_stress import StressProbabilityModel
 from afp_app.engine import MarketMancerEngine
 from afp_app.scenario import scenario_factor_premia, scenario_stress
 
-
 st.set_page_config(page_title="AFP Forecasting Tool", layout="wide")
 
 st.title("AFP Forecasting Tool")
 st.caption("Factor premia forecasts, per-ticker alpha, and market stress regime")
 
 # -------------------------------------------------------------------
-# Session state for reusing results (for sensitivity analysis)
+# Session state for reusing results (for sensitivity analysis and display)
 # -------------------------------------------------------------------
-if "base_forecasts" not in st.session_state:
-    st.session_state["base_forecasts"] = None
-if "base_alpha" not in st.session_state:
-    st.session_state["base_alpha"] = None
-if "base_stress" not in st.session_state:
-    st.session_state["base_stress"] = None
-if "base_factor_eval" not in st.session_state:
-    st.session_state["base_factor_eval"] = None
-if "modeling_frame" not in st.session_state:
-    st.session_state["modeling_frame"] = None
-if "forecaster_obj" not in st.session_state:
-    st.session_state["forecaster_obj"] = None
-if "stress_model_obj" not in st.session_state:
-    st.session_state["stress_model_obj"] = None
+for key, default in [
+    ("base_forecasts", None),
+    ("base_alpha", None),
+    ("base_stress", None),
+    ("base_factor_eval", None),
+    ("modeling_frame", None),
+    ("forecaster_obj", None),
+    ("stress_model_obj", None),
+    ("base_recs", None),
+]:
+    if key not in st.session_state:
+        st.session_state[key] = default
 
 # -------------------------------------------------------------------
 # Sidebar controls
@@ -109,16 +106,8 @@ with st.sidebar:
 status = st.empty()
 
 # -------------------------------------------------------------------
-# Main pipeline
+# Main pipeline: only computes and stores in session_state
 # -------------------------------------------------------------------
-forecasts = st.session_state["base_forecasts"]
-alpha_preds = st.session_state["base_alpha"]
-stress_fc = st.session_state["base_stress"]
-factor_eval = st.session_state["base_factor_eval"]
-modeling = st.session_state["modeling_frame"]
-forecaster = st.session_state["forecaster_obj"]
-stress = st.session_state["stress_model_obj"]
-
 if run_btn:
     t0 = time.time()
 
@@ -228,7 +217,6 @@ if run_btn:
     for tk in tickers[:cap]:
         p = alpha.predict_alpha(tk, horizon=forecast_horizon)
         if p:
-            # Keep only top_k_drivers for display
             if "drivers" in p and "top_features" in p["drivers"]:
                 p["drivers"]["top_features"] = (
                     p["drivers"].get("top_features") or []
@@ -240,7 +228,7 @@ if run_btn:
     # ---------------- Signal 3: stress regime ----------------
     status.info("Estimating market stress probability...")
     stress = StressProbabilityModel()
-    feature_importance_stress = stress.fit(modeling)
+    _fi = stress.fit(modeling)
     stress_fc = stress.predict(modeling)
 
     st.session_state["stress_model_obj"] = stress
@@ -250,8 +238,26 @@ if run_btn:
     status.info("Integrating recommendations...")
     engine = MarketMancerEngine(forecasts, alpha_preds, stress_fc or {})
     recs = engine.generate()
+    st.session_state["base_recs"] = recs
 
-    # ---------------- Display sections ----------------
+    t1 = time.time()
+    st.success(f"Pipeline complete in {t1 - t0:.1f} seconds.")
+
+# -------------------------------------------------------------------
+# Display from session_state (works even when run_btn is not pressed)
+# -------------------------------------------------------------------
+forecasts = st.session_state.get("base_forecasts")
+alpha_preds = st.session_state.get("base_alpha")
+stress_fc = st.session_state.get("base_stress")
+factor_eval = st.session_state.get("base_factor_eval")
+modeling = st.session_state.get("modeling_frame")
+forecaster = st.session_state.get("forecaster_obj")
+stress = st.session_state.get("stress_model_obj")
+recs = st.session_state.get("base_recs")
+
+if not forecasts and not alpha_preds and not stress_fc:
+    st.info("Run the pipeline from the sidebar to generate forecasts.")
+else:
     # Stress
     st.subheader("Stress regime")
 
@@ -288,7 +294,6 @@ if run_btn:
     st.subheader("Factor premia forecasts")
 
     if forecasts:
-
         # 1. Summary table
         summary_rows = []
         drivers_rows = []
@@ -320,7 +325,7 @@ if run_btn:
 
         # 2. Top drivers table
         if drivers_rows:
-            st.markdown(f"Top **{top_k_drivers}** drivers per factor")
+            st.markdown("Top drivers per factor")
             df_drivers = pd.DataFrame(drivers_rows)
             st.dataframe(
                 df_drivers.style.format(
@@ -355,7 +360,6 @@ if run_btn:
                 ),
                 use_container_width=True,
             )
-
     else:
         st.info("No factor forecasts available.")
 
@@ -404,9 +408,7 @@ if run_btn:
             pass
 
         # 3. Driver tables for each top 10 stock
-        st.markdown(
-            f"Top **{top_k_drivers}** drivers for each of the top 10 stocks"
-        )
+        st.markdown("Top drivers for each of the top 10 stocks")
         for _, row in df_alpha.head(10).iterrows():
             ticker = row["ticker"]
             alpha_val = row["expected_alpha_%"]
@@ -427,10 +429,10 @@ if run_btn:
 
     # Integrated recommendations
     st.subheader("Integrated recommendations")
-    st.json(recs)
-
-    t1 = time.time()
-    st.success(f"Done in {t1 - t0:.1f} seconds.")
+    if recs:
+        st.json(recs)
+    else:
+        st.info("No integrated recommendations available. Run the pipeline first.")
 
 # -------------------------------------------------------------------
 # Sensitivity analysis section (uses stored base results)
@@ -451,20 +453,20 @@ if forecasts and modeling is not None and forecaster and stress:
         "factor premium forecasts and stress probability would change."
     )
 
+    # Keys for sliders
     SENS_KEYS = ["scn_rates", "scn_102y", "scn_103m", "scn_credit", "scn_vix"]
 
     def _reset_sensitivity():
-        # Remove keys so sliders reinitialize to defaults on next run
-        for k in SENS_KEYS:
-            if k in st.session_state:
-                del st.session_state[k]
+        # Set slider values back to zero in session_state
+        st.session_state["scn_rates"] = 0
+        st.session_state["scn_102y"] = 0
+        st.session_state["scn_103m"] = 0
+        st.session_state["scn_credit"] = 0
+        st.session_state["scn_vix"] = 0
 
     col_reset, col_run = st.columns([1, 1])
     with col_reset:
-        if st.button("Reset shocks to 0"):
-            _reset_sensitivity()
-            st.rerun()
-
+        st.button("Reset shocks to 0", on_click=_reset_sensitivity)
     with col_run:
         run_scen_btn = st.button("Run sensitivity scenario")
 
@@ -548,9 +550,7 @@ if forecasts and modeling is not None and forecaster and stress:
 
         if scen_rows:
             st.markdown("**Factor premium scenario results**")
-            df_scen = pd.DataFrame(scen_rows).sort_values(
-                "Factor"
-            )
+            df_scen = pd.DataFrame(scen_rows).sort_values("Factor")
             st.dataframe(
                 df_scen.style.format(
                     {
