@@ -243,3 +243,6 @@ class StressProbabilityModel:
             "regime": regime,
             "key_indicators": key_indicators,
         }
+
+
+
