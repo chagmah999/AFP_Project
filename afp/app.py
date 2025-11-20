@@ -302,15 +302,26 @@ if st.session_state.pipeline_ready:
     else:
         st.info("No factor forecasts available.")
 
-    # Alpha predictions
     st.subheader("Alpha predictions (top 10)")
-    alpha_preds = st.session_state.alpha_preds or {}
-    if (
-        alpha_preds
-        and hasattr(st.session_state, "df_alpha")
-        and not st.session_state.df_alpha.empty
-    ):
-        df_alpha = st.session_state.df_alpha
+
+    if alpha_preds:
+
+        # Build DataFrame of all predicted alphas
+        df_alpha = pd.DataFrame(
+            [
+                {
+                    "ticker": tk,
+                    "expected_alpha_%": v["expected_alpha"] * 100.0,
+                    "fundamental_score": v["drivers"].get("fundamental_score", None),
+                    "top_features": v["drivers"].get("top_features", []),
+                }
+                for tk, v in alpha_preds.items()
+            ]
+        ).sort_values("expected_alpha_%", ascending=False)
+
+        # -----------------------------------
+        # 1. Display top-10 predicted alphas
+        # -----------------------------------
         show_top = df_alpha.head(10)[
             ["ticker", "expected_alpha_%", "fundamental_score"]
         ]
@@ -319,17 +330,50 @@ if st.session_state.pipeline_ready:
             use_container_width=True,
         )
 
-        st.markdown("Top drivers for each of the top 10 stocks")
+        # -----------------------------------
+        # 2. Alpha signal-strength summary
+        # -----------------------------------
+        try:
+            n = len(df_alpha)
+            if n >= 30:
+
+                # Top and bottom decile means (minimum 3 tickers each)
+                k = max(int(n * 0.10), 3)
+                bottom_mean = df_alpha.tail(0 - k)["expected_alpha_%"].mean()
+                top_mean = df_alpha.head(k)["expected_alpha_%"].mean()
+                spread = top_mean - bottom_mean
+
+                st.markdown(
+                    f"**Alpha signal summary**: top decile mean expected alpha "
+                    f"**{top_mean:.2f}%**, bottom decile **{bottom_mean:.2f}%**, "
+                    f"spread **{spread:.2f}%**."
+                )
+
+        except Exception:
+            pass
+
+        # -----------------------------------
+        # 3. Driver importance for each of top-10 stocks
+        # -----------------------------------
+        st.markdown(f"Top **{top_k_drivers}** drivers for each of the top 10 stocks")
+
         for _, row in df_alpha.head(10).iterrows():
-            with st.expander(f"{row['ticker']} — {row['expected_alpha_%']:.2f}%"):
-                feats = row["top_features"]
+            ticker = row["ticker"]
+            alpha_val = row["expected_alpha_%"]
+            feats = row["top_features"]
+
+            with st.expander(f"{ticker} — {alpha_val:.2f}%"):
                 if feats:
                     df_feats = pd.DataFrame(feats)
+
+                    # Rename columns for readability if needed
                     if "coef" in df_feats.columns:
                         df_feats = df_feats.rename(columns={"coef": "Coefficient"})
+
                     st.dataframe(df_feats, use_container_width=True)
                 else:
                     st.write("No feature importances available for this ticker.")
+
     else:
         st.info("No alpha predictions available.")
 
