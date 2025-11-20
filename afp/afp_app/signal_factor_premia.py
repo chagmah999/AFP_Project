@@ -81,38 +81,99 @@ class FactorPremiaForecaster:
         return self.models[factor_name]
 
     def walk_forward_validation(self, data: pd.DataFrame, target_factor: str):
-        X, y, feats = self.prepare_features_targets(data.copy(), target_factor)
+        """
+        Perform walk-forward validation and store summary metrics:
+        - average RMSE, MAE, hit rate across folds
+        Also returns a DataFrame of fold-level results.
+        """
+        print(f"\nWalk-forward validation for {target_factor}...")
+
+        X, y, features = self.prepare_features_targets(data, target_factor)
+
         if len(X) < self.lookback_window + self.forecast_horizon:
+            print(f"Insufficient data for walk-forward validation")
             return None
 
+        # Split points for walk-forward
         n_splits = 5
         test_size = len(X) // (n_splits + 1)
+
         results = []
+
         for i in range(n_splits):
             train_end = (i + 1) * test_size
             test_end = min(train_end + test_size, len(X))
 
-            X_train, y_train = X.iloc[:train_end], y.iloc[:train_end]
-            X_test, y_test = X.iloc[train_end:test_end], y.iloc[train_end:test_end]
+            X_train = X.iloc[:train_end]
+            y_train = y.iloc[:train_end]
+            X_test = X.iloc[train_end:test_end]
+            y_test = y.iloc[train_end:test_end]
+
             if len(X_train) < 50 or len(X_test) < 10:
                 continue
 
+            # Train models
             self.train_models(X_train, y_train, target_factor)
 
-            Xs_test = self.scalers[target_factor].transform(X_test)
-            preds = {name: mdl.predict(Xs_test) for name, mdl in self.models[target_factor].items()}
-            ens = np.mean(list(preds.values()), axis=0)
+            # Make predictions
+            X_test_scaled = self.scalers[target_factor].transform(X_test)
 
-            fold = {
-                'fold': i,
-                'n_test': len(y_test),
-                'ensemble_rmse': float(np.sqrt(((ens - y_test.values) ** 2).mean())),
-                'ensemble_mae': float(np.abs(ens - y_test.values).mean()),
-                'ensemble_hit_rate': float((np.sign(ens) == np.sign(y_test.values)).mean())
+            predictions = {}
+            for model_name, model in self.models[target_factor].items():
+                pred = model.predict(X_test_scaled)
+                predictions[model_name] = pred
+
+            # Ensemble prediction (simple average)
+            ensemble_pred = np.mean(list(predictions.values()), axis=0)
+
+            # Fold level metrics
+            fold_results = {
+                "factor": target_factor,
+                "fold": i,
+                "n_test": len(y_test),
+                "test_start": data.iloc[train_end]["date"] if "date" in data.columns else train_end,
+                "test_end": data.iloc[test_end - 1]["date"] if "date" in data.columns else test_end,
             }
-            results.append(fold)
 
-        return pd.DataFrame(results) if results else None
+            # Metrics for each model (RMSE, MAE, hit rate)
+            for model_name, pred in predictions.items():
+                fold_results[f"{model_name}_rmse"] = float(np.sqrt(mean_squared_error(y_test, pred)))
+                fold_results[f"{model_name}_mae"] = float(mean_absolute_error(y_test, pred))
+                fold_results[f"{model_name}_hit"] = float(np.mean(np.sign(pred) == np.sign(y_test)))
+
+            # Ensemble metrics
+            fold_results["ensemble_rmse"] = float(np.sqrt(mean_squared_error(y_test, ensemble_pred)))
+            fold_results["ensemble_mae"] = float(mean_absolute_error(y_test, ensemble_pred))
+            fold_results["ensemble_hit"] = float(np.mean(np.sign(ensemble_pred) == np.sign(y_test)))
+
+            results.append(fold_results)
+
+        if not results:
+            return None
+
+        results_df = pd.DataFrame(results)
+
+        # Summary statistics (store for later retrieval in the app)
+        summary = {
+            "factor": target_factor,
+            "ensemble_rmse": results_df["ensemble_rmse"].mean(),
+            "ensemble_mae": results_df["ensemble_mae"].mean(),
+            "ensemble_hit_rate": results_df["ensemble_hit"].mean(),
+        }
+
+        # Keep a per factor summary dictionary on the object
+        if not hasattr(self, "validation_summary"):
+            self.validation_summary = {}
+        self.validation_summary[target_factor] = summary
+
+        print(f"\n{target_factor} Validation Results:")
+        print("=" * 50)
+        print(f"Average Ensemble RMSE: {summary['ensemble_rmse']:.4f}")
+        print(f"Average Ensemble MAE: {summary['ensemble_mae']:.4f}")
+        print(f"Average Ensemble Hit Rate: {summary['ensemble_hit_rate']:.2%}")
+
+        return results_df
+
 
     def forecast_next(self, data: pd.DataFrame, target_factor: str):
         """
