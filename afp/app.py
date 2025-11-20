@@ -5,8 +5,10 @@ import pandas as pd
 import streamlit as st
 
 from afp_app.config import (
-    FMP_API_KEY, DEFAULT_START_DATE, DEFAULT_UNIVERSE_SIZE,
-    LOOKBACK_DAYS
+    FMP_API_KEY,
+    DEFAULT_START_DATE,
+    DEFAULT_UNIVERSE_SIZE,
+    LOOKBACK_DAYS,
 )
 from afp_app.universe import get_universe
 from afp_app.fmp import FMPDataFetcher
@@ -20,7 +22,11 @@ from afp_app.signal_stress import StressProbabilityModel
 from afp_app.engine import MarketMancerEngine
 
 from afp_app.scenario import scenario_factor_premia, scenario_stress
-from afp_app.sensitivity import compute_latest_betas, factor_delta_map, reproject_alpha_for_top10
+from afp_app.sensitivity import (
+    compute_latest_betas,
+    factor_delta_map,
+    reproject_alpha_for_top10,
+)
 
 st.set_page_config(page_title="AFP Forecasting Tool", layout="wide")
 
@@ -97,7 +103,9 @@ def run_pipeline():
     metrics = calculate_factor_metrics(fundamentals, prices)
     ctor = FactorPortfolioConstructor(metrics, prices)
     portfolios = ctor.construct_all()
-    factor_returns = ctor.calculate_factor_returns(start_date, prices["date"].max().strftime("%Y-%m-%d"))
+    factor_returns = ctor.calculate_factor_returns(
+        start_date, prices["date"].max().strftime("%Y-%m-%d")
+    )
 
     # Macro features & modeling frame
     status.info("Fetching macro data...")
@@ -113,11 +121,13 @@ def run_pipeline():
 
     # Signal 1: Factor premia
     status.info("Forecasting factor premia...")
-    forecaster = FactorPremiaForecaster(lookback_window=LOOKBACK_DAYS, forecast_horizon=forecast_horizon)
+    forecaster = FactorPremiaForecaster(
+        lookback_window=LOOKBACK_DAYS, forecast_horizon=forecast_horizon
+    )
     factors = ["VALUE", "QUALITY", "MOMENTUM", "LOW_VOL"]
     forecasts = {}
     for f in factors:
-        _ = forecaster.walk_forward_validation(modeling, f)  
+        _ = forecaster.walk_forward_validation(modeling, f)
         fc = forecaster.forecast_next(modeling, f)
         if fc:
             fc["top_drivers"] = (fc.get("top_drivers") or [])[:top_k_drivers]
@@ -125,13 +135,17 @@ def run_pipeline():
 
     # Signal 2: Alpha
     status.info("Predicting per-ticker alpha...")
-    alpha_model = AlphaPredictor(factor_returns, fundamentals, prices, horizon=forecast_horizon, lookback=252*2)
+    alpha_model = AlphaPredictor(
+        factor_returns, fundamentals, prices, horizon=forecast_horizon, lookback=252 * 2
+    )
     alpha_preds = {}
     cap = min(100, len(tickers))  # UI cap
     for tk in tickers[:cap]:
         p = alpha_model.predict_alpha(tk, horizon=forecast_horizon)
         if p:
-            p["drivers"]["top_features"] = (p["drivers"].get("top_features") or [])[:top_k_drivers]
+            p["drivers"]["top_features"] = (p["drivers"].get("top_features") or [])[
+                :top_k_drivers
+            ]
             alpha_preds[tk] = p
 
     # Signal 3: Stress
@@ -147,12 +161,17 @@ def run_pipeline():
 
     # Build top10 list for later sensitivity use
     if alpha_preds:
-        df_alpha = pd.DataFrame([{
-            "ticker": tk,
-            "expected_alpha_%": v["expected_alpha"] * 100.0,
-            "fundamental_score": v["drivers"]["fundamental_score"],
-            "top_features": v["drivers"].get("top_features", [])
-        } for tk, v in alpha_preds.items()]).sort_values("expected_alpha_%", ascending=False)
+        df_alpha = pd.DataFrame(
+            [
+                {
+                    "ticker": tk,
+                    "expected_alpha_%": v["expected_alpha"] * 100.0,
+                    "fundamental_score": v["drivers"]["fundamental_score"],
+                    "top_features": v["drivers"].get("top_features", []),
+                }
+                for tk, v in alpha_preds.items()
+            ]
+        ).sort_values("expected_alpha_%", ascending=False)
         top10_tickers = df_alpha.head(10)["ticker"].tolist()
     else:
         df_alpha = pd.DataFrame()
@@ -197,38 +216,108 @@ if st.session_state.pipeline_ready:
 
     # Data status
     prices = st.session_state.prices
-    st.success(f"Collected {len(prices)} price rows. Date range: {prices['date'].min()} to {prices['date'].max()}")
+    st.success(
+        f"Collected {len(prices)} price rows. Date range: {prices['date'].min()} to {prices['date'].max()}"
+    )
 
     # Portfolios built
     st.subheader("Portfolios built")
     portfolios = st.session_state.portfolios or {}
-    st.json({k: 0 if v is None or (hasattr(v, 'empty') and v.empty) else len(v) for k, v in portfolios.items()})
+    st.json(
+        {
+            k: 0 if v is None or (hasattr(v, "empty") and v.empty) else len(v)
+            for k, v in portfolios.items()
+        }
+    )
 
-    # Factor premia forecasts
     st.subheader("Factor premia forecasts")
-    forecasts = st.session_state.forecasts or {}
+
     if forecasts:
-        summary_rows, drivers_rows = [], []
+
+        # -----------------------------
+        # 1. Summary table (expected premium)
+        # -----------------------------
+        summary_rows = []
+        drivers_rows = []
         for f, v in forecasts.items():
-            summary_rows.append({"Factor": f, "Expected Premium %": v["ensemble_forecast"] * 100.0})
-            for d in (v.get("top_drivers") or []):
-                drivers_rows.append({"Factor": f, "Driver": d.get("feature"), "RF Importance": d.get("rf_importance")})
-        df_summary = pd.DataFrame(summary_rows).sort_values("Expected Premium %", ascending=False)
-        st.dataframe(df_summary.style.format({"Expected Premium %": "{:.2f}"}), use_container_width=True)
+            summary_rows.append(
+                {"Factor": f, "Expected Premium %": v["ensemble_forecast"] * 100.0}
+            )
+            for d in v.get("top_drivers") or []:
+                drivers_rows.append(
+                    {
+                        "Factor": f,
+                        "Driver": d.get("feature"),
+                        "RF Importance": d.get("rf_importance"),
+                    }
+                )
+
+        df_summary = pd.DataFrame(summary_rows).sort_values(
+            "Expected Premium %", ascending=False
+        )
+        st.dataframe(
+            df_summary.style.format({"Expected Premium %": "{:.2f}"}),
+            use_container_width=True,
+        )
+
+        # -----------------------------
+        # 2. Top drivers table
+        # -----------------------------
         if drivers_rows:
-            st.markdown("Top drivers per factor")
+            st.markdown(f"Top **{top_k_drivers}** drivers per factor")
             df_drivers = pd.DataFrame(drivers_rows)
-            st.dataframe(df_drivers.style.format({"RF Importance": "{:.3f}"}), use_container_width=True)
+            st.dataframe(
+                df_drivers.style.format({"RF Importance": "{:.3f}"}),
+                use_container_width=True,
+            )
+
+        # -----------------------------
+        # 3. NEW: Factor signal validation section
+        # -----------------------------
+        if "factor_eval" in locals() and factor_eval:
+            st.markdown("### Factor signal validation (walk-forward)")
+            eval_rows = []
+            for f, s in factor_eval.items():
+                eval_rows.append(
+                    {
+                        "Factor": f,
+                        "Ensemble Hit Rate": s["ensemble_hit_rate"],
+                        "Ensemble RMSE": s["ensemble_rmse"],
+                        "Ensemble MAE": s["ensemble_mae"],
+                    }
+                )
+            df_eval = pd.DataFrame(eval_rows)
+
+            st.dataframe(
+                df_eval.style.format(
+                    {
+                        "Ensemble Hit Rate": "{:.2%}",
+                        "Ensemble RMSE": "{:.4f}",
+                        "Ensemble MAE": "{:.4f}",
+                    }
+                ),
+                use_container_width=True,
+            )
+
     else:
         st.info("No factor forecasts available.")
 
     # Alpha predictions
     st.subheader("Alpha predictions (top 10)")
     alpha_preds = st.session_state.alpha_preds or {}
-    if alpha_preds and hasattr(st.session_state, "df_alpha") and not st.session_state.df_alpha.empty:
+    if (
+        alpha_preds
+        and hasattr(st.session_state, "df_alpha")
+        and not st.session_state.df_alpha.empty
+    ):
         df_alpha = st.session_state.df_alpha
-        show_top = df_alpha.head(10)[["ticker", "expected_alpha_%", "fundamental_score"]]
-        st.dataframe(show_top.style.format({"expected_alpha_%": "{:.2f}"}), use_container_width=True)
+        show_top = df_alpha.head(10)[
+            ["ticker", "expected_alpha_%", "fundamental_score"]
+        ]
+        st.dataframe(
+            show_top.style.format({"expected_alpha_%": "{:.2f}"}),
+            use_container_width=True,
+        )
 
         st.markdown("Top drivers for each of the top 10 stocks")
         for _, row in df_alpha.head(10).iterrows():
@@ -248,7 +337,9 @@ if st.session_state.pipeline_ready:
     st.subheader("Stress regime")
     stress_fc = st.session_state.stress_fc
     if stress_fc:
-        st.write(f"Regime: **{stress_fc['regime']}**  |  Stress probability: **{stress_fc['stress_probability']*100:.1f}%**")
+        st.write(
+            f"Regime: **{stress_fc['regime']}**  |  Stress probability: **{stress_fc['stress_probability']*100:.1f}%**"
+        )
 
     # Integrated recommendations
     st.subheader("Integrated recommendations")
@@ -259,7 +350,9 @@ if st.session_state.pipeline_ready:
     # ---------------- Sensitivity ---------------- #
     st.markdown("---")
     st.header("Sensitivity analysis")
-    st.caption("Adjust macro inputs and see impact on factor premia and on the top-10 alphas. No retraining or refetching.")
+    st.caption(
+        "Adjust macro inputs and see impact on factor premia and on the top-10 alphas. No retraining or refetching."
+    )
 
     # ---- Sensitivity reset ----
     if "sens_version" not in st.session_state:
@@ -276,22 +369,35 @@ if st.session_state.pipeline_ready:
 
     colL, colR = st.columns([1, 1])
     with colL:
-        shock_rates      = st.slider("Rates level shock (bps)", -300, 300, 0, step=5, key=skey("scn_rates"))
-        shock_term_10y2y = st.slider("10y-2y term spread shock (bps)", -200, 200, 0, step=5, key=skey("scn_102y"))
-        shock_term_10y3m = st.slider("10y-3m term spread shock (bps)", -300, 300, 0, step=5, key=skey("scn_103m"))
+        shock_rates = st.slider(
+            "Rates level shock (bps)", -300, 300, 0, step=5, key=skey("scn_rates")
+        )
+        shock_term_10y2y = st.slider(
+            "10y-2y term spread shock (bps)", -200, 200, 0, step=5, key=skey("scn_102y")
+        )
+        shock_term_10y3m = st.slider(
+            "10y-3m term spread shock (bps)", -300, 300, 0, step=5, key=skey("scn_103m")
+        )
     with colR:
-        shock_credit     = st.slider("Credit spread level shock (bps)", -300, 300, 0, step=5, key=skey("scn_credit"))
-        shock_vix        = st.slider("VIX level shock (%)", -50, 200, 0, step=5, key=skey("scn_vix"))
-
-
+        shock_credit = st.slider(
+            "Credit spread level shock (bps)",
+            -300,
+            300,
+            0,
+            step=5,
+            key=skey("scn_credit"),
+        )
+        shock_vix = st.slider(
+            "VIX level shock (%)", -50, 200, 0, step=5, key=skey("scn_vix")
+        )
 
     # Compute scenarios from saved objects on every interaction, without re-running pipeline
     shocks = {
-        "rates_bp":        shock_rates,
-        "term_10y2y_bp":   shock_term_10y2y,
-        "term_10y3m_bp":   shock_term_10y3m,
-        "credit_bp":       shock_credit,
-        "vix_pct":         shock_vix,
+        "rates_bp": shock_rates,
+        "term_10y2y_bp": shock_term_10y2y,
+        "term_10y3m_bp": shock_term_10y3m,
+        "credit_bp": shock_credit,
+        "vix_pct": shock_vix,
     }
 
     # Scenario factor forecasts
@@ -311,17 +417,29 @@ if st.session_state.pipeline_ready:
             scen_er = scen_fc.get(f, {}).get("ensemble_forecast", None)
             if scen_er is None:
                 continue
-            factor_rows.append({
-                "Factor": f,
-                "Base ER %": None if base_er is None else base_er * 100.0,
-                "Scenario ER %": scen_er * 100.0,
-                "Delta (bp)": None if base_er is None else (scen_er - base_er) * 10000.0
-            })
+            factor_rows.append(
+                {
+                    "Factor": f,
+                    "Base ER %": None if base_er is None else base_er * 100.0,
+                    "Scenario ER %": scen_er * 100.0,
+                    "Delta (bp)": None
+                    if base_er is None
+                    else (scen_er - base_er) * 10000.0,
+                }
+            )
         if factor_rows:
-            df_factors_scen = pd.DataFrame(factor_rows).sort_values("Scenario ER %", ascending=False)
+            df_factors_scen = pd.DataFrame(factor_rows).sort_values(
+                "Scenario ER %", ascending=False
+            )
             st.dataframe(
-                df_factors_scen.style.format({"Base ER %": "{:.2f}", "Scenario ER %": "{:.2f}", "Delta (bp)": "{:.1f}"}),
-                use_container_width=True
+                df_factors_scen.style.format(
+                    {
+                        "Base ER %": "{:.2f}",
+                        "Scenario ER %": "{:.2f}",
+                        "Delta (bp)": "{:.1f}",
+                    }
+                ),
+                use_container_width=True,
             )
 
     # Reproject top-10 alphas using factor deltas and betasx
@@ -335,18 +453,30 @@ if st.session_state.pipeline_ready:
         betas_wide = compute_latest_betas(prices, factor_returns, tickers, window=252)
         dER = factor_delta_map(base_forecasts, scen_fc)
         if not betas_wide.empty and dER:
-            df_alpha_scen = reproject_alpha_for_top10(top10_tickers, alpha_preds, betas_wide, dER)
+            df_alpha_scen = reproject_alpha_for_top10(
+                top10_tickers, alpha_preds, betas_wide, dER
+            )
             st.markdown("Top-10 alpha under scenario")
             st.dataframe(
-                df_alpha_scen.style.format({"base_alpha_%": "{:.2f}", "scenario_alpha_%": "{:.2f}", "delta_bp": "{:.1f}"}),
-                use_container_width=True
+                df_alpha_scen.style.format(
+                    {
+                        "base_alpha_%": "{:.2f}",
+                        "scenario_alpha_%": "{:.2f}",
+                        "delta_bp": "{:.1f}",
+                    }
+                ),
+                use_container_width=True,
             )
         else:
-            st.info("Could not compute scenario alpha. Make sure factor deltas and betas are available.")
+            st.info(
+                "Could not compute scenario alpha. Make sure factor deltas and betas are available."
+            )
     else:
         st.info("No top-10 list available to project alpha.")
 
-    st.caption("Alpha sensitivity = base alpha + sum(beta_f × Δfactor_ER_f). All other variables held constant.")
+    st.caption(
+        "Alpha sensitivity = base alpha + sum(beta_f × Δfactor_ER_f). All other variables held constant."
+    )
 
 else:
     st.info("Set options in the sidebar and click Run pipeline.")
