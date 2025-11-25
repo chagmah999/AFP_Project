@@ -1,5 +1,4 @@
 import os
-import json
 import time
 import numpy as np
 import pandas as pd
@@ -11,6 +10,7 @@ from afp_app.config import (
     DEFAULT_UNIVERSE_SIZE,
     LOOKBACK_DAYS,
 )
+
 from afp_app.universe import get_universe
 from afp_app.fmp import FMPDataFetcher
 from afp_app.data import collect_fundamental_data, collect_price_data
@@ -26,27 +26,27 @@ from afp_app.scenario import scenario_factor_premia, scenario_stress
 st.set_page_config(page_title="AFP Forecasting Tool", layout="wide")
 
 st.title("AFP Forecasting Tool")
-st.caption("Factor premia forecasts, per-ticker alpha, and market stress regime")
+st.caption("Factor premia forecasts, stock-level alpha, stress regime, and scenario analysis")
 
-# -------------------------------------------------------------------
-# Session state for reusing results (for sensitivity analysis and display)
-# -------------------------------------------------------------------
+# -------------------------------------------------------------
+# Session State Initialization
+# -------------------------------------------------------------
 for key, default in [
     ("base_forecasts", None),
+    ("base_factor_eval", None),
     ("base_alpha", None),
     ("base_stress", None),
-    ("base_factor_eval", None),
+    ("base_recs", None),
     ("modeling_frame", None),
     ("forecaster_obj", None),
     ("stress_model_obj", None),
-    ("base_recs", None),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
 
-# -------------------------------------------------------------------
-# Sidebar controls
-# -------------------------------------------------------------------
+# -------------------------------------------------------------
+# Sidebar
+# -------------------------------------------------------------
 with st.sidebar:
     st.subheader("Configuration")
 
@@ -54,78 +54,74 @@ with st.sidebar:
         "FMP API Key",
         value=FMP_API_KEY or "",
         type="password",
-        help="Financial Modeling Prep API key",
+        help="Your FMP API key",
     )
 
     start_date = st.text_input(
         "Start date (YYYY-MM-DD)",
         value=DEFAULT_START_DATE,
-        help="Earliest date to pull data for backtests and model training",
+        help="Earliest date for analysis",
     )
 
-    st.markdown("**Universe**")
+    st.markdown("### Universe")
     universe_size = st.slider(
         "Universe size",
         min_value=10,
         max_value=509,
         value=DEFAULT_UNIVERSE_SIZE,
         step=5,
-        help="Number of S&P 500 stocks to include",
     )
     randomize = st.checkbox(
         "Randomize universe selection",
         value=True,
-        help="If unchecked, uses the first N tickers alphabetically",
     )
     seed = st.number_input(
         "Random seed",
-        min_value=0,
         value=42,
         step=1,
-        help="Seed for random universe selection",
     )
 
-    st.markdown("**Forecasting**")
+    st.markdown("### Forecasting")
     forecast_horizon = st.slider(
         "Forecast horizon (days)",
         min_value=5,
         max_value=63,
         value=21,
         step=1,
-        help="Length H of the forward window for factor premiums and alpha",
     )
+
     top_k_drivers = st.radio(
-        "Top drivers to show (per factor/stock)",
+        "Number of top drivers to show",
         options=[3, 5],
         index=0,
-        help="Number of top drivers by importance to display",
     )
 
     run_btn = st.button("Run pipeline")
 
 status = st.empty()
 
-# -------------------------------------------------------------------
-# Main pipeline: only computes and stores in session_state
-# -------------------------------------------------------------------
+# -------------------------------------------------------------
+# Main Pipeline
+# -------------------------------------------------------------
 if run_btn:
     t0 = time.time()
 
-    if not api_key or api_key == "YOUR_FMP_API_KEY":
-        st.error("Please set a valid FMP API key.")
+    if not api_key:
+        st.error("Please enter a valid FMP API key.")
         st.stop()
 
-    # ---------------- Universe ----------------
-    status.info("Building universe...")
+    # ------------------ Universe ------------------
+    status.info("Selecting universe...")
     tickers = get_universe(
         universe_size,
         randomize=randomize,
         seed=int(seed),
     )
+
     st.write(f"Universe of {len(tickers)} tickers:")
     st.dataframe(pd.DataFrame({"ticker": tickers}), use_container_width=True)
 
-    # ---------------- Data collection ----------------
+    # ------------------ Data Collection ------------------
     status.info("Fetching fundamentals and prices...")
     fetcher = FMPDataFetcher(api_key=api_key)
     fundamentals = collect_fundamental_data(tickers, start_date, fetcher)
@@ -140,58 +136,59 @@ if run_btn:
         f"Date range: {prices['date'].min()} to {prices['date'].max()}"
     )
 
-    # ---------------- Factors: metrics and portfolios ----------------
-    status.info("Computing factor metrics...")
+    # ------------------ Factor Metrics & Portfolios ------------------
+    status.info("Computing factor scores...")
     metrics = calculate_factor_metrics(fundamentals, prices)
+
     if metrics.empty:
-        st.warning("No factor metrics computed. Check fundamental coverage.")
+        st.warning("No factor metrics available. Check fundamentals coverage.")
     else:
-        # Build factor portfolios as before
-        st.write("Portfolios built:")
+        st.subheader("Factor portfolios (size of long+short)")
         ctor = FactorPortfolioConstructor(metrics, prices)
         portfolios = ctor.construct_all()
-        st.json({k: 0 if v is None or v.empty else len(v) for k, v in portfolios.items()})
+
+        port_sizes = {
+            k: (0 if v is None or v.empty else len(v))
+            for k, v in portfolios.items()
+        }
+        st.json(port_sizes)
+
         factor_returns = ctor.calculate_factor_returns(
             start_date,
-            prices["date"].max().strftime("%Y-%m-%d")
+            prices["date"].max().strftime("%Y-%m-%d"),
         )
 
-        # New: show stock-level factor scores (0-1) for a sample of names
-        st.subheader("Sample stock-level factor scores")
+        # ------- Show Sample Stock-Level 0–1 Factor Scores -------
+        st.subheader("Sample stock-level factor scores (0–1)")
 
-        # Use the latest metrics per ticker
-        latest_metrics = (
+        latest = (
             metrics.sort_values("date")
             .groupby("ticker")
             .last()
             .reset_index()
         )
 
-        # Start with the 0-1 scores that already exist
-        score_cols = []
-        for col in ["value_score", "quality_score", "lowvol_score"]:
-            if col in latest_metrics.columns:
-                score_cols.append(col)
-
-        # Optionally create a 0-1 momentum score for display
-        if "momentum_60d" in latest_metrics.columns:
-            latest_metrics["momentum_score"] = latest_metrics["momentum_60d"].rank(
-                pct=True
-            )
-            score_cols.append("momentum_score")
+        score_cols = [
+            c for c in [
+                "value_score",
+                "quality_score",
+                "momentum_score",
+                "lowvol_score",
+            ]
+            if c in latest.columns
+        ]
 
         if score_cols:
-            sample_scores = (
-                latest_metrics[["ticker"] + score_cols]
+            sample = (
+                latest[["ticker"] + score_cols]
                 .sort_values("ticker")
-                .head(30)     # show first 30 tickers to keep the table readable
+                .head(30)
             )
-            st.dataframe(sample_scores, use_container_width=True)
+            st.dataframe(sample, use_container_width=True)
         else:
-            st.info("No stock-level factor scores available to display.")
+            st.info("No stock-level factor scores to display.")
 
-
-    # ---------------- Macro features and modeling frame ----------------
+    # ------------------ Macro Data & Modeling Frame ------------------
     status.info("Fetching macro data...")
     m = MacroDataFetcher(api_key=api_key)
     macro = {
@@ -204,7 +201,7 @@ if run_btn:
     modeling = prepare_modeling_data(factor_returns, macro, prices)
     st.session_state["modeling_frame"] = modeling
 
-    # ---------------- Signal 1: factor premia ----------------
+    # ------------------ Factor Premia Forecasting ------------------
     status.info("Forecasting factor premia...")
     forecaster = FactorPremiaForecaster(
         lookback_window=LOOKBACK_DAYS,
@@ -217,12 +214,12 @@ if run_btn:
     factor_eval = {}
 
     for f in factors:
-        # Walk forward validation (gives direction hit rate and error metrics)
-        res = forecaster.walk_forward_validation(modeling, f)
-        if res is not None:
+        # Walk-forward validation (stores RMSE, MAE, hit rate)
+        val = forecaster.walk_forward_validation(modeling, f)
+        if val is not None:
             factor_eval[f] = forecaster.validation_summary.get(f, {})
 
-        # Forecast next H day factor premium
+        # Forward forecast
         fc = forecaster.forecast_next(modeling, f)
         if fc:
             fc["top_drivers"] = (fc.get("top_drivers") or [])[:top_k_drivers]
@@ -231,7 +228,7 @@ if run_btn:
     st.session_state["base_forecasts"] = forecasts
     st.session_state["base_factor_eval"] = factor_eval
 
-    # ---------------- Signal 2: alpha (per ticker) ----------------
+    # ------------------ Alpha Predictions ------------------
     status.info("Predicting per-ticker alpha...")
     alpha = AlphaPredictor(
         factor_returns,
@@ -240,41 +237,40 @@ if run_btn:
         horizon=forecast_horizon,
         lookback=252 * 2,
     )
+
     alpha_preds = {}
     cap = min(100, len(tickers))
 
     for tk in tickers[:cap]:
-        p = alpha.predict_alpha(tk, horizon=forecast_horizon)
-        if p:
-            if "drivers" in p and "top_features" in p["drivers"]:
-                p["drivers"]["top_features"] = (
-                    p["drivers"].get("top_features") or []
-                )[:top_k_drivers]
-            alpha_preds[tk] = p
+        res = alpha.predict_alpha(tk, horizon=forecast_horizon)
+        if res:
+            if "drivers" in res:
+                top = res["drivers"].get("top_features", [])
+                res["drivers"]["top_features"] = top[:top_k_drivers]
+            alpha_preds[tk] = res
 
     st.session_state["base_alpha"] = alpha_preds
 
-    # ---------------- Signal 3: stress regime ----------------
+    # ------------------ Stress Probability ------------------
     status.info("Estimating market stress probability...")
     stress = StressProbabilityModel()
-    _fi = stress.fit(modeling)
+    _ = stress.fit(modeling)
     stress_fc = stress.predict(modeling)
 
     st.session_state["stress_model_obj"] = stress
     st.session_state["base_stress"] = stress_fc
 
-    # ---------------- Integrate recommendations ----------------
+    # ------------------ Integrated Recommendations ------------------
     status.info("Integrating recommendations...")
     engine = MarketMancerEngine(forecasts, alpha_preds, stress_fc or {})
     recs = engine.generate()
     st.session_state["base_recs"] = recs
 
     t1 = time.time()
-    st.success(f"Pipeline complete in {t1 - t0:.1f} seconds.")
-
-# -------------------------------------------------------------------
-# Display from session_state (works even when run_btn is not pressed)
-# -------------------------------------------------------------------
+    st.success(f"Pipeline completed in {t1 - t0:.1f} seconds.")
+# -------------------------------------------------------------
+# Display Section (Persists after running pipeline)
+# -------------------------------------------------------------
 forecasts = st.session_state.get("base_forecasts")
 alpha_preds = st.session_state.get("base_alpha")
 stress_fc = st.session_state.get("base_stress")
@@ -287,7 +283,8 @@ recs = st.session_state.get("base_recs")
 if not forecasts and not alpha_preds and not stress_fc:
     st.info("Run the pipeline from the sidebar to generate forecasts.")
 else:
-    # Stress
+
+    # ------------------ Stress ------------------
     st.subheader("Stress regime")
 
     if stress_fc:
@@ -295,37 +292,39 @@ else:
             f"Regime: **{stress_fc['regime']}**  |  "
             f"Stress probability: **{stress_fc['stress_probability']*100:.1f}%**"
         )
+
         auc = getattr(stress, "cv_auc_mean", None)
         share = getattr(stress, "stress_share", None)
+
         if auc is not None:
             line += f"  |  Model AUC: **{auc:.3f}**"
         if share is not None:
-            line += (
-                f"  |  Historical stress frequency: "
-                f"**{share*100:.1f}%**"
-            )
+            line += f"  |  Historical stress frequency: **{share*100:.1f}%**"
+
         st.write(line)
 
+        # Key indicators table
         key_ind = stress_fc.get("key_indicators", {})
         if key_ind:
             st.markdown("Key indicators at latest date:")
-            rows = [{"Indicator": k, "Value": v} for k, v in key_ind.items()]
-            if rows:
-                df_ind = pd.DataFrame(rows)
-                st.dataframe(
-                    df_ind.style.format({"Value": "{:.3f}"}),
-                    use_container_width=True,
-                )
+            df_ind = pd.DataFrame(
+                [{"Indicator": k, "Value": v} for k, v in key_ind.items()]
+            )
+            st.dataframe(
+                df_ind.style.format({"Value": "{:.3f}"}),
+                use_container_width=True,
+            )
     else:
         st.info("No stress regime forecast available.")
 
-    # Factor premia
+    # ------------------ Factor Premia Forecasts ------------------
     st.subheader("Factor premia forecasts")
 
     if forecasts:
-        # 1. Summary table
+        # Summary table
         summary_rows = []
         drivers_rows = []
+
         for f, v in forecasts.items():
             summary_rows.append(
                 {
@@ -346,24 +345,20 @@ else:
             "Expected Premium %", ascending=False
         )
         st.dataframe(
-            df_summary.style.format(
-                {"Expected Premium %": "{:.2f}"}
-            ),
+            df_summary.style.format({"Expected Premium %": "{:.2f}"}),
             use_container_width=True,
         )
 
-        # 2. Top drivers table
+        # Driver importance table
         if drivers_rows:
             st.markdown("Top drivers per factor")
             df_drivers = pd.DataFrame(drivers_rows)
             st.dataframe(
-                df_drivers.style.format(
-                    {"RF Importance": "{:.3f}"}
-                ),
+                df_drivers.style.format({"RF Importance": "{:.3f}"}),
                 use_container_width=True,
             )
 
-        # 3. Validation summary (hit rate and errors)
+        # Validation Summary
         if factor_eval:
             st.markdown("### Factor signal validation (walk-forward)")
 
@@ -392,7 +387,7 @@ else:
     else:
         st.info("No factor forecasts available.")
 
-    # Alpha
+    # ------------------ Alpha Predictions ------------------
     st.subheader("Alpha predictions (top 10)")
 
     if alpha_preds:
@@ -401,16 +396,14 @@ else:
                 {
                     "ticker": tk,
                     "expected_alpha_%": v["expected_alpha"] * 100.0,
-                    "fundamental_score": v["drivers"].get(
-                        "fundamental_score", None
-                    ),
+                    "fundamental_score": v["drivers"].get("fundamental_score", None),
                     "top_features": v["drivers"].get("top_features", []),
                 }
                 for tk, v in alpha_preds.items()
             ]
         ).sort_values("expected_alpha_%", ascending=False)
 
-        # 1. Top 10 table
+        # Top 10 table
         show_top = df_alpha.head(10)[
             ["ticker", "expected_alpha_%", "fundamental_score"]
         ]
@@ -419,7 +412,7 @@ else:
             use_container_width=True,
         )
 
-        # 2. Alpha signal strength (top vs bottom)
+        # Alpha signal strength
         try:
             n = len(df_alpha)
             if n >= 30:
@@ -429,43 +422,41 @@ else:
                 spread = top_mean - bottom_mean
 
                 st.markdown(
-                    f"**Alpha signal summary**: top decile mean expected alpha "
-                    f"**{top_mean:.2f}%**, bottom decile **{bottom_mean:.2f}%**, "
-                    f"spread **{spread:.2f}%**."
+                    f"**Alpha signal summary**: "
+                    f"Top decile mean **{top_mean:.2f}%**, "
+                    f"Bottom decile **{bottom_mean:.2f}%**, "
+                    f"Spread **{spread:.2f}%**."
                 )
         except Exception:
             pass
 
-        # 3. Driver tables for each top 10 stock
+        # Driver details for each top 10 stock
         st.markdown("Top drivers for each of the top 10 stocks")
         for _, row in df_alpha.head(10).iterrows():
-            ticker = row["ticker"]
+            tk = row["ticker"]
             alpha_val = row["expected_alpha_%"]
             feats = row["top_features"]
 
-            with st.expander(f"{ticker} - {alpha_val:.2f}%"):
+            with st.expander(f"{tk} — {alpha_val:.2f}%"):
                 if feats:
                     df_feats = pd.DataFrame(feats)
                     if "coef" in df_feats.columns:
-                        df_feats = df_feats.rename(
-                            columns={"coef": "Coefficient"}
-                        )
+                        df_feats.rename(columns={"coef": "Coefficient"}, inplace=True)
                     st.dataframe(df_feats, use_container_width=True)
                 else:
                     st.write("No feature importances available for this ticker.")
     else:
         st.info("No alpha predictions available.")
 
-    # Integrated recommendations
+    # ------------------ Integrated Recommendations ------------------
     st.subheader("Integrated recommendations")
     if recs:
         st.json(recs)
     else:
-        st.info("No integrated recommendations available. Run the pipeline first.")
-
-# -------------------------------------------------------------------
-# Sensitivity analysis section (uses stored base results)
-# -------------------------------------------------------------------
+        st.info("No integrated recommendations available.")
+# -------------------------------------------------------------
+# Sensitivity Analysis (uses stored base results)
+# -------------------------------------------------------------
 forecasts = st.session_state.get("base_forecasts")
 alpha_preds = st.session_state.get("base_alpha")
 stress_fc = st.session_state.get("base_stress")
@@ -478,71 +469,59 @@ if forecasts and modeling is not None and forecaster and stress:
     st.subheader("Sensitivity analysis")
 
     st.caption(
-        "Apply macro shocks to the latest feature vector and see how "
+        "Apply macro shocks to the latest feature vector to see how "
         "factor premium forecasts and stress probability would change."
     )
 
-    # Keys for sliders
+    # Slider keys
     SENS_KEYS = ["scn_rates", "scn_102y", "scn_103m", "scn_credit", "scn_vix"]
 
+    # Reset function
     def _reset_sensitivity():
-        # Set slider values back to zero in session_state
-        st.session_state["scn_rates"] = 0
-        st.session_state["scn_102y"] = 0
-        st.session_state["scn_103m"] = 0
-        st.session_state["scn_credit"] = 0
-        st.session_state["scn_vix"] = 0
+        """
+        Reset slider values to zero. After resetting we re-render
+        the section but do NOT delete session_state keys so the app
+        does not break.
+        """
+        for k in SENS_KEYS:
+            st.session_state[k] = 0
 
     col_reset, col_run = st.columns([1, 1])
+
     with col_reset:
         st.button("Reset shocks to 0", on_click=_reset_sensitivity)
+
     with col_run:
         run_scen_btn = st.button("Run sensitivity scenario")
 
+    # ---------------- Sliders ----------------
     colL, colR = st.columns([1, 1])
+
     with colL:
         shock_rates = st.slider(
             "Rates level shock (bps)",
-            min_value=-300,
-            max_value=300,
-            value=0,
-            step=5,
-            key="scn_rates",
+            -300, 300, 0, step=5, key="scn_rates"
         )
         shock_term_10y2y = st.slider(
             "10y-2y term spread shock (bps)",
-            min_value=-200,
-            max_value=200,
-            value=0,
-            step=5,
-            key="scn_102y",
+            -200, 200, 0, step=5, key="scn_102y"
         )
         shock_term_10y3m = st.slider(
             "10y-3m term spread shock (bps)",
-            min_value=-300,
-            max_value=300,
-            value=0,
-            step=5,
-            key="scn_103m",
+            -300, 300, 0, step=5, key="scn_103m"
         )
+
     with colR:
         shock_credit = st.slider(
-            "Credit spread level shock (bps)",
-            min_value=-300,
-            max_value=300,
-            value=0,
-            step=5,
-            key="scn_credit",
+            "Credit spread shock (bps)",
+            -300, 300, 0, step=5, key="scn_credit"
         )
         shock_vix = st.slider(
             "VIX level shock (%)",
-            min_value=-50,
-            max_value=200,
-            value=0,
-            step=5,
-            key="scn_vix",
+            -50, 200, 0, step=5, key="scn_vix"
         )
 
+    # ---------------- Run scenario ----------------
     if run_scen_btn:
         shocks = {
             "rates_bp": shock_rates,
@@ -556,9 +535,9 @@ if forecasts and modeling is not None and forecaster and stress:
         scen_rows = []
         for f, base_fc in forecasts.items():
             scen_fc = scenario_factor_premia(
-                forecaster,
-                modeling,
-                f,
+                forecaster=forecaster,
+                modeling=modeling,
+                factor=f,
                 shocks=shocks,
             )
             if scen_fc is None:
@@ -592,7 +571,12 @@ if forecasts and modeling is not None and forecaster and stress:
             )
 
         # Stress scenario
-        scen_stress = scenario_stress(stress, modeling, shocks=shocks)
+        scen_stress = scenario_stress(
+            stress_model=stress,
+            data=modeling,
+            shocks=shocks,
+        )
+
         if scen_stress and stress_fc:
             base_prob = stress_fc["stress_probability"] * 100.0
             scen_prob = scen_stress["stress_probability"] * 100.0
@@ -601,14 +585,12 @@ if forecasts and modeling is not None and forecaster and stress:
             st.markdown("**Stress probability scenario result**")
             st.write(
                 f"Base regime **{stress_fc['regime']}** "
-                f"({base_prob:.1f}%)  ->  "
+                f"({base_prob:.1f}%) → "
                 f"Scenario regime **{scen_stress['regime']}** "
-                f"({scen_prob:.1f}%), "
-                f"change **{delta_prob:.1f} percentage points**."
+                f"({scen_prob:.1f}%) "
+                f"| Change: **{delta_prob:.1f} percentage points**"
             )
+
 else:
     st.markdown("---")
-    st.info(
-        "Run the pipeline first to enable sensitivity analysis "
-        "based on the latest forecasts."
-    )
+    st.info("Run the pipeline first to enable sensitivity analysis.")
