@@ -143,24 +143,53 @@ if run_btn:
     # ---------------- Factors: metrics and portfolios ----------------
     status.info("Computing factor metrics...")
     metrics = calculate_factor_metrics(fundamentals, prices)
-
     if metrics.empty:
         st.warning("No factor metrics computed. Check fundamental coverage.")
-        portfolios = {}
-        factor_returns = pd.DataFrame()
     else:
+        # Build factor portfolios as before
+        st.write("Portfolios built:")
         ctor = FactorPortfolioConstructor(metrics, prices)
         portfolios = ctor.construct_all()
-        st.write("Portfolios built:")
-        st.json(
-            {
-                k: 0 if v is None or v.empty else len(v)
-                for k, v in portfolios.items()
-            }
-        )
+        st.json({k: 0 if v is None or v.empty else len(v) for k, v in portfolios.items()})
         factor_returns = ctor.calculate_factor_returns(
-            start_date, prices["date"].max().strftime("%Y-%m-%d")
+            start_date,
+            prices["date"].max().strftime("%Y-%m-%d")
         )
+
+        # New: show stock-level factor scores (0-1) for a sample of names
+        st.subheader("Sample stock-level factor scores")
+
+        # Use the latest metrics per ticker
+        latest_metrics = (
+            metrics.sort_values("date")
+            .groupby("ticker")
+            .last()
+            .reset_index()
+        )
+
+        # Start with the 0-1 scores that already exist
+        score_cols = []
+        for col in ["value_score", "quality_score", "lowvol_score"]:
+            if col in latest_metrics.columns:
+                score_cols.append(col)
+
+        # Optionally create a 0-1 momentum score for display
+        if "momentum_60d" in latest_metrics.columns:
+            latest_metrics["momentum_score"] = latest_metrics["momentum_60d"].rank(
+                pct=True
+            )
+            score_cols.append("momentum_score")
+
+        if score_cols:
+            sample_scores = (
+                latest_metrics[["ticker"] + score_cols]
+                .sort_values("ticker")
+                .head(30)     # show first 30 tickers to keep the table readable
+            )
+            st.dataframe(sample_scores, use_container_width=True)
+        else:
+            st.info("No stock-level factor scores available to display.")
+
 
     # ---------------- Macro features and modeling frame ----------------
     status.info("Fetching macro data...")
