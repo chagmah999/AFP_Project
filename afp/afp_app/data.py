@@ -47,6 +47,12 @@ def collect_fundamental_data(tickers, start_date, fetcher):
         inc_df = inc_df.merge(profile_df, on="ticker", how="left")
         cf_df = cf_df.merge(profile_df, on="ticker", how="left")
 
+        # Ensure date columns are proper datetimes
+    for df in (bs_df, inc_df, cf_df):
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+
+
     return {
         "balance_sheet": bs_df,
         "income_statement": inc_df,
