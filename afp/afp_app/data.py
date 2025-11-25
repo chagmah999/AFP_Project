@@ -1,9 +1,8 @@
 import time
 import pandas as pd
-import numpy as np           
+import numpy as np
 from datetime import datetime
 from .fmp import FMPDataFetcher
-
 
 
 def collect_fundamental_data(tickers, start_date, fetcher):
@@ -55,66 +54,72 @@ def collect_fundamental_data(tickers, start_date, fetcher):
     }
 
 
-
-def collect_price_data(tickers, start_date, end_date, fetcher):
+def collect_price_data(
+    tickers: list[str],
+    start_date: str,
+    end_date: str | None,
+    fetcher: FMPDataFetcher,
+) -> pd.DataFrame:
     """
-    Pull daily price history for each ticker and build a single DataFrame with:
-      - date
-      - ticker
-      - adjClose
-      - returns
-    """
-    frames = []
+    Collect daily price data for all tickers using FMPDataFetcher.get_price_history.
 
-    for tk in tickers:
+    Returns a DataFrame with at least:
+        date, ticker, adjClose, returns, log_returns
+    """
+    frames: list[pd.DataFrame] = []
+
+    if end_date is None:
+        end_date = datetime.now().strftime("%Y-%m-%d")
+
+    for i, t in enumerate(tickers, 1):
         try:
-            df = fetcher.fetch_price_history(
-                symbol=tk,
-                start_date=start_date,
-                end_date=end_date,
-            )
+            # Use the new method defined in fmp.py
+            px = fetcher.get_price_history(t, start_date, end_date)
 
-            if df is None or df.empty:
-                print(f"[warn] no prices for {tk}")
+            if not isinstance(px, pd.DataFrame) or px.empty:
                 continue
 
-            # Ensure expected columns and clean
-            if "date" not in df.columns:
-                print(f"[warn] prices {tk}: no 'date' column in response")
-                continue
+            # Ensure required columns are present
+            if "adjClose" not in px.columns:
+                # If get_price_history was changed to return a different column, handle gracefully
+                if "close" in px.columns:
+                    px = px.rename(columns={"close": "adjClose"})
+                else:
+                    continue
 
-            # FMP usually gives 'adjClose'; if only 'close' exists, fall back to that
-            if "adjClose" not in df.columns and "close" in df.columns:
-                df = df.rename(columns={"close": "adjClose"})
+            # Attach ticker
+            px = px.copy()
+            px["ticker"] = t
 
-            if "adjClose" not in df.columns:
-                print(f"[warn] prices {tk}: no 'adjClose' or 'close' column")
-                continue
+            # Ensure date is datetime and sorted
+            if "date" in px.columns:
+                px["date"] = pd.to_datetime(px["date"])
+                px = px.sort_values("date")
 
-            df = df[["date", "adjClose"]].copy()
-            df["date"] = pd.to_datetime(df["date"])
-            df = df.sort_values("date")
+            # Compute returns and log_returns
+            s = pd.to_numeric(px["adjClose"], errors="coerce")
+            px["returns"] = s.pct_change()
 
-            # Compute simple daily returns
-            df["returns"] = df["adjClose"].pct_change()
+            # Guard against non positive ratios before log
+            ratio = s.div(s.shift(1))
+            ratio = ratio.clip(lower=1e-12)
+            px["log_returns"] = np.log(ratio)
 
-            df["ticker"] = tk
-
-            frames.append(df)
+            frames.append(px)
 
         except Exception as e:
-            print(f"[warn] prices {tk}: {e}")
-            continue
+            print(f"[warn] prices {t}: {e}")
+
+        # Small pause to be gentle with the API
+        if i % 5 == 0:
+            time.sleep(0.1)
 
     if not frames:
-        # Return an empty DataFrame with the right columns so app.py will see empty
-        return pd.DataFrame(columns=["date", "ticker", "adjClose", "returns"])
+        return pd.DataFrame()
 
-    prices = pd.concat(frames, ignore_index=True)
-
-    # Final sanity check: drop rows with NaN prices
-    prices = prices.dropna(subset=["adjClose"])
-
-    return prices
-
-
+    out = (
+        pd.concat(frames, ignore_index=True)
+        .sort_values(["ticker", "date"])
+        .reset_index(drop=True)
+    )
+    return out
