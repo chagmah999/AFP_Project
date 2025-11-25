@@ -45,18 +45,19 @@ class FactorPremiaForecaster:
 
         Features include:
           - Macro variables (rates, curves, credit, VIX)
-          - Lagged factor returns (1, 5, 21, 63 days)
+          - Lagged factor premiums (1, 5, 21, 63 days)
+          - Moving average factor premiums (21d, 63d)
 
         Target:
-          - Forward H-day average factor premium:
-                y_{t} = (1/H) * sum_{k=1..H} fp_{t+k}
+          - Forward H day average factor premium:
+                y_t = (1/H) * sum_{k=1..H} fp_{t+k}
             implemented as: shift(-H).rolling(H).mean()
         """
         H = self.forecast_horizon
         df = data.copy()
 
-        # Macro features
-        macro_features = [
+        # Base macro features
+        base_features = [
             "rates_level",
             "rates_1m_change",
             "term_spread_10y2y",
@@ -67,14 +68,23 @@ class FactorPremiaForecaster:
             "credit_spread_1m_change",
         ]
 
-        # Lagged factor returns as features
+        feature_cols: list[str] = base_features.copy()
+
         if target_factor in df.columns:
+            # Lagged factor premiums
             for lag in [1, 5, 21, 63]:
                 col = f"{target_factor}_lag{lag}"
                 df[col] = df[target_factor].shift(lag)
-                macro_features.append(col)
+                feature_cols.append(col)
 
-            # Forward H-day average of factor premium (realized forward premium)
+            # Moving average factor premiums (time series structure)
+            ma21_col = f"{target_factor}_ma21"
+            ma63_col = f"{target_factor}_ma63"
+            df[ma21_col] = df[target_factor].rolling(21).mean()
+            df[ma63_col] = df[target_factor].rolling(63).mean()
+            feature_cols.extend([ma21_col, ma63_col])
+
+            # Forward H day average of factor premium (realized forward premium)
             fwd_col = f"{target_factor}_forward"
             df[fwd_col] = df[target_factor].shift(-H).rolling(H).mean()
         else:
@@ -82,8 +92,9 @@ class FactorPremiaForecaster:
             fwd_col = f"{target_factor}_forward"
             df[fwd_col] = np.nan
 
-        # Restrict to columns that actually exist
-        feature_cols = [c for c in macro_features if c in df.columns]
+        # Keep only columns that actually exist, and remove duplicates
+        feature_cols = [c for c in feature_cols if c in df.columns]
+        feature_cols = list(dict.fromkeys(feature_cols))
 
         # Drop rows with missing values in features or target
         valid = df[feature_cols + [fwd_col]].dropna()
@@ -94,6 +105,7 @@ class FactorPremiaForecaster:
         y = valid[fwd_col]
 
         return X, y, feature_cols
+
 
     # ------------------------------------------------------------------
     # Model training
@@ -156,8 +168,8 @@ class FactorPremiaForecaster:
     ) -> pd.DataFrame | None:
         """
         Perform walk-forward validation and store summary metrics:
-          - average RMSE, MAE, hit rate across folds (for ensemble)
-        Also returns a DataFrame of fold-level results.
+          - average RMSE, MAE, hit rate across folds for the ensemble
+          - average RMSE, MAE, hit rate for a simple AR(1) time series baseline
 
         Direction hit rate is:
             mean( sign(pred) == sign(actual) )
@@ -175,6 +187,9 @@ class FactorPremiaForecaster:
             print("Insufficient data for walk-forward validation")
             return None
 
+        # For AR(1) baseline we need lagged targets
+        y_lag_all = y.shift(1)
+
         n_splits = 5
         test_size = len(X) // (n_splits + 1)
         results = []
@@ -191,10 +206,11 @@ class FactorPremiaForecaster:
             if len(X_train) < 50 or len(X_test) < 10:
                 continue
 
-            # Train models on this fold
+            # -----------------------------
+            # 1) Train ensemble models
+            # -----------------------------
             self.train_models(X_train, y_train, target_factor)
 
-            # Predict on test
             X_test_scaled = self.scalers[target_factor].transform(X_test)
             predictions = {}
             for name, mdl in self.models[target_factor].items():
@@ -203,7 +219,39 @@ class FactorPremiaForecaster:
             # Ensemble prediction (simple average)
             ensemble_pred = np.mean(list(predictions.values()), axis=0)
 
-            # Fold metrics
+            # -----------------------------
+            # 2) AR(1) baseline on y_t
+            # -----------------------------
+            # Fit y_t = a + b * y_{t-1} using training data only
+            y_train_lag = y_lag_all.iloc[:train_end]
+
+            mask = y_train.notna() & y_train_lag.notna()
+            y_curr = y_train[mask]
+            y_lag = y_train_lag[mask]
+
+            if len(y_curr) >= 20:
+                # Simple OLS via polyfit: y ≈ b * y_lag + a
+                b, a = np.polyfit(y_lag.values, y_curr.values, 1)
+            else:
+                # Fallback: constant baseline equal to mean of y_train
+                a = float(y_train.mean())
+                b = 0.0
+
+            # For the test period, use y_{t-1} as regressor (can come from training or test)
+            y_lag_test = y_lag_all.iloc[train_end:test_end]
+            if y_lag_test.isna().any():
+                # Fill missing lags with last non-null training value
+                if y_train.dropna().empty:
+                    fallback = 0.0
+                else:
+                    fallback = float(y_train.dropna().iloc[-1])
+                y_lag_test = y_lag_test.fillna(fallback)
+
+            ar1_pred = a + b * y_lag_test.values
+
+            # -----------------------------
+            # 3) Collect fold-level metrics
+            # -----------------------------
             fold = {
                 "factor": target_factor,
                 "fold": i,
@@ -243,6 +291,17 @@ class FactorPremiaForecaster:
                 np.mean(np.sign(ensemble_pred) == np.sign(y_test))
             )
 
+            # AR(1) baseline metrics
+            fold["ar1_rmse"] = float(
+                np.sqrt(mean_squared_error(y_test, ar1_pred))
+            )
+            fold["ar1_mae"] = float(
+                mean_absolute_error(y_test, ar1_pred)
+            )
+            fold["ar1_hit"] = float(
+                np.mean(np.sign(ar1_pred) == np.sign(y_test))
+            )
+
             results.append(fold)
 
         if not results:
@@ -256,6 +315,9 @@ class FactorPremiaForecaster:
             "ensemble_rmse": float(results_df["ensemble_rmse"].mean()),
             "ensemble_mae": float(results_df["ensemble_mae"].mean()),
             "ensemble_hit_rate": float(results_df["ensemble_hit"].mean()),
+            "ar1_rmse": float(results_df["ar1_rmse"].mean()),
+            "ar1_mae": float(results_df["ar1_mae"].mean()),
+            "ar1_hit_rate": float(results_df["ar1_hit"].mean()),
         }
         self.validation_summary[target_factor] = summary
 
@@ -264,8 +326,12 @@ class FactorPremiaForecaster:
         print(f"Average Ensemble RMSE: {summary['ensemble_rmse']:.4f}")
         print(f"Average Ensemble MAE : {summary['ensemble_mae']:.4f}")
         print(f"Average Ensemble Hit : {summary['ensemble_hit_rate']:.2%}")
+        print(f"Average AR(1) RMSE   : {summary['ar1_rmse']:.4f}")
+        print(f"Average AR(1) MAE    : {summary['ar1_mae']:.4f}")
+        print(f"Average AR(1) Hit    : {summary['ar1_hit_rate']:.2%}")
 
         return results_df
+
 
     # ------------------------------------------------------------------
     # Forecast next period
