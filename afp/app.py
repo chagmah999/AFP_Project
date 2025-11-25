@@ -126,10 +126,17 @@ if run_btn:
     fetcher = FMPDataFetcher(api_key=api_key)
     fundamentals = collect_fundamental_data(tickers, start_date, fetcher)
     prices = collect_price_data(tickers, start_date, None, fetcher)
-
-    if prices.empty:
+    
+    st.write("Debug: prices.shape =", getattr(prices, "shape", None))
+    st.write(prices.head())
+    if prices is None:
+        st.error("collect_price_data returned None")
+        st.stop()
+    
+    if isinstance(prices, pd.DataFrame) and prices.empty:
         st.error("No price data returned. Check API key, tickers, or date range.")
         st.stop()
+
 
     st.success(
         f"Collected {len(prices)} price rows. "
