@@ -19,10 +19,15 @@ class AlphaPredictor:
 
     @staticmethod
     def _last_before(df, date_col, date_val):
-        if df.empty:
+        if df.empty or date_col not in df.columns:
             return pd.DataFrame()
-        df = df[df[date_col] <= date_val]
+        df = df.copy()
+        df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+        mask = df[date_col].notna() & (df[date_col] <= date_val)
+        df = df[mask]
+        
         return df.iloc[[-1]] if not df.empty else pd.DataFrame()
+
 
     def _build_fundamental_row(self, ticker: str, asof: pd.Timestamp) -> dict:
         bs = self.fundamentals.get("balance_sheet", pd.DataFrame())
