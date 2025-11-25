@@ -12,26 +12,31 @@ def _safe_div(num, den):
     return out
 
 
-def calculate_factor_metrics(fundamentals: dict, price_data: pd.DataFrame) -> pd.DataFrame:
+def calculate_factor_metrics(
+    fundamentals: dict,
+    price_data: pd.DataFrame
+) -> pd.DataFrame:
     """
-    Build factor inputs and industry-neutral 0-1 scores for VALUE, QUALITY, MOMENTUM, LOW_VOL.
+    Build factor inputs and industry-neutral 0-1 scores for VALUE, QUALITY,
+    MOMENTUM, and LOW_VOL.
 
     - Uses FMP fundamentals (balance sheet, income statement, cash flow)
     - Carries through 'sector' / 'industry' if present
     - Computes raw ratios
     - Computes 60d momentum and 60d realized volatility
-    - Normalizes within (date, sector) or (date, industry) using percentile ranks
+    - Normalizes within sector (or industry) using percentile ranks
     """
     bs = fundamentals.get("balance_sheet", pd.DataFrame())
     inc = fundamentals.get("income_statement", pd.DataFrame())
-    cf  = fundamentals.get("cash_flow", pd.DataFrame())
+    cf = fundamentals.get("cash_flow", pd.DataFrame())
 
     if bs.empty or inc.empty:
         return pd.DataFrame()
 
-    # Columns to keep from balance sheet, including optional sector metadata if present
+    # ---------------- Merge fundamentals ----------------
     bs_cols = [
-        "ticker", "date",
+        "ticker",
+        "date",
         "totalStockholdersEquity",
         "totalAssets",
         "totalLiabilities",
@@ -44,9 +49,9 @@ def calculate_factor_metrics(fundamentals: dict, price_data: pd.DataFrame) -> pd
 
     bs_use = bs[bs_cols].copy()
 
-    # Income statement
     inc_cols = [
-        "ticker", "date",
+        "ticker",
+        "date",
         "revenue",
         "netIncome",
         "grossProfit",
@@ -63,7 +68,6 @@ def calculate_factor_metrics(fundamentals: dict, price_data: pd.DataFrame) -> pd
         how="inner",
     )
 
-    # Cash flow (optional)
     if not cf.empty:
         cf_cols = ["ticker", "date", "freeCashFlow", "operatingCashFlow"]
         cf_use = cf[cf_cols].copy()
@@ -74,10 +78,10 @@ def calculate_factor_metrics(fundamentals: dict, price_data: pd.DataFrame) -> pd
             how="left",
         )
 
-    # Fundamental ratios
+    # ---------------- Fundamental ratios ----------------
     metrics["book_equity"] = metrics["totalStockholdersEquity"]
 
-    # This is a simplified "value" proxy, consistent with the previous codebase:
+    # Simplified value proxy (consistent with earlier codebase)
     metrics["earnings_yield"] = _safe_div(
         metrics["netIncome"],
         metrics["totalAssets"],
@@ -104,13 +108,11 @@ def calculate_factor_metrics(fundamentals: dict, price_data: pd.DataFrame) -> pd
         metrics["totalStockholdersEquity"],
     )
 
-    # ---------------- Momentum and volatility from price data ---------------- #
+    # ---------------- Momentum and volatility from price data ----------------
     if price_data.empty:
-        # still return fundamentals-based metrics in this case
         metrics = metrics.replace([np.inf, -np.inf], np.nan)
         return metrics
 
-    # Pivot prices for momentum
     px_pivot = price_data.pivot_table(
         index="date",
         columns="ticker",
@@ -119,8 +121,6 @@ def calculate_factor_metrics(fundamentals: dict, price_data: pd.DataFrame) -> pd
 
     # 60-day momentum: simple percentage change over 60 trading days
     mom_60d = px_pivot.pct_change(60)
-
-    # Attach latest 60d momentum per ticker to metrics
     if not mom_60d.empty:
         last_mom = mom_60d.iloc[-1]
         for tk in last_mom.index:
@@ -139,82 +139,80 @@ def calculate_factor_metrics(fundamentals: dict, price_data: pd.DataFrame) -> pd
     for tk in vol_60d.index:
         metrics.loc[metrics["ticker"] == tk, "volatility_60d"] = vol_60d[tk]
 
-    # ---------------- Industry-neutral 0-1 scores ---------------- #
-    # Grouping level: (date, sector) if available, else (date, industry), else (date)
+    # ---------------- Cross-sectional 0-1 scores (industry-neutral) ----------------
+    # Grouping level: sector if available, else industry, else whole universe
     if "sector" in metrics.columns:
-        group_cols = ["date", "sector"]
+        group_cols = ["sector"]
     elif "industry" in metrics.columns:
-        group_cols = ["date", "industry"]
+        group_cols = ["industry"]
     else:
-        group_cols = ["date"]
+        group_cols = []  # all names together
 
-    def _rank_pct(x, ascending=True):
-        return x.rank(method="average", pct=True, ascending=ascending)
+    def _rank_pct(series: pd.Series, ascending: bool = True) -> pd.Series:
+        return series.rank(method="average", pct=True, ascending=ascending)
 
-    # VALUE: percentile of earnings_yield (higher is cheaper / more "value")
+    # Helper to apply groupwise rank or global rank if no group_cols
+    def _group_rank(col_name: str, ascending: bool = True) -> pd.Series:
+        if group_cols:
+            return (
+                metrics.groupby(group_cols)[col_name]
+                .transform(lambda s: _rank_pct(s, ascending=ascending))
+            )
+        else:
+            return _rank_pct(metrics[col_name], ascending=ascending)
+
+    # VALUE: high earnings_yield = cheap
     if "earnings_yield" in metrics.columns:
-        metrics["value_score"] = (
-            metrics.groupby(group_cols)["earnings_yield"]
-            .transform(lambda s: _rank_pct(s, ascending=True))
-        )
+        metrics["value_score"] = _group_rank("earnings_yield", ascending=True)
 
-    # QUALITY: average percentile of profitability and margins, plus inverse leverage
-    # Rank each component within group, then average row-wise.
+    # QUALITY: average of ROE, ROA, margins, inverse leverage
     quality_components = []
 
     if "roe" in metrics.columns:
-        metrics["q_roe"] = (
-            metrics.groupby(group_cols)["roe"]
-            .transform(lambda s: _rank_pct(s, ascending=True))
-        )
+        metrics["q_roe"] = _group_rank("roe", ascending=True)
         quality_components.append("q_roe")
 
     if "roa" in metrics.columns:
-        metrics["q_roa"] = (
-            metrics.groupby(group_cols)["roa"]
-            .transform(lambda s: _rank_pct(s, ascending=True))
-        )
+        metrics["q_roa"] = _group_rank("roa", ascending=True)
         quality_components.append("q_roa")
 
     if "gross_margin" in metrics.columns:
-        metrics["q_gm"] = (
-            metrics.groupby(group_cols)["gross_margin"]
-            .transform(lambda s: _rank_pct(s, ascending=True))
-        )
+        metrics["q_gm"] = _group_rank("gross_margin", ascending=True)
         quality_components.append("q_gm")
 
     if "fcf_margin" in metrics.columns:
-        metrics["q_fcfm"] = (
-            metrics.groupby(group_cols)["fcf_margin"]
-            .transform(lambda s: _rank_pct(s, ascending=True))
-        )
+        metrics["q_fcfm"] = _group_rank("fcf_margin", ascending=True)
         quality_components.append("q_fcfm")
 
-    # Inverse leverage: lower debt_to_equity is better
     if "debt_to_equity" in metrics.columns:
-        metrics["q_levinv"] = (
-            metrics.groupby(group_cols)["debt_to_equity"]
-            .transform(lambda s: 1.0 - _rank_pct(s, ascending=True))
-        )
+        # Lower leverage is better, so 1 - percentile of debt_to_equity
+        if group_cols:
+            lev_rank = (
+                metrics.groupby(group_cols)["debt_to_equity"]
+                .transform(lambda s: _rank_pct(s, ascending=True))
+            )
+        else:
+            lev_rank = _rank_pct(metrics["debt_to_equity"], ascending=True)
+        metrics["q_levinv"] = 1.0 - lev_rank
         quality_components.append("q_levinv")
 
     if quality_components:
         metrics["quality_score"] = metrics[quality_components].mean(axis=1)
 
-    # LOW VOL: low volatility should have high score.
-    # Score = 1 - percentile of volatility within the group.
+    # LOW VOL: low volatility should have high score
     if "volatility_60d" in metrics.columns:
-        metrics["lowvol_score"] = (
-            metrics.groupby(group_cols)["volatility_60d"]
-            .transform(lambda s: 1.0 - _rank_pct(s, ascending=True))
-        )
+        if group_cols:
+            vol_rank = (
+                metrics.groupby(group_cols)["volatility_60d"]
+                .transform(lambda s: _rank_pct(s, ascending=True))
+            )
+        else:
+            vol_rank = _rank_pct(metrics["volatility_60d"], ascending=True)
+        metrics["lowvol_score"] = 1.0 - vol_rank
 
-    # MOMENTUM: percentile of 60d momentum within the group
+    # MOMENTUM: percentile of 60d momentum within group
     if "momentum_60d" in metrics.columns:
-        metrics["momentum_score"] = (
-            metrics.groupby(group_cols)["momentum_60d"]
-            .transform(lambda s: _rank_pct(s, ascending=True))
-        )
+        metrics["momentum_score"] = _group_rank("momentum_60d", ascending=True)
 
     metrics = metrics.replace([np.inf, -np.inf], np.nan)
     return metrics
@@ -327,7 +325,11 @@ class FactorPortfolioConstructor:
         self.portfolios = ports
         return ports
 
-    def calculate_factor_returns(self, start_date: str, end_date: str) -> pd.DataFrame:
+    def calculate_factor_returns(
+        self,
+        start_date: str,
+        end_date: str,
+    ) -> pd.DataFrame:
         """
         Compute daily long-short factor returns from the constructed portfolios.
         """
