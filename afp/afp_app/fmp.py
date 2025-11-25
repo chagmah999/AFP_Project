@@ -54,3 +54,40 @@ class FMPDataFetcher:
             "sector": data[0].get("sector"),
             "industry": data[0].get("industry"),
         }
+    # --------------------------------------------------------
+    # Price history
+    # --------------------------------------------------------
+    def get_price_history(self, ticker: str, start_date: str, end_date: str | None = None):
+        """
+        Fetch daily historical prices for a ticker from FMP.
+        Uses /historical-price-full/{ticker}?from=YYYY-MM-DD&to=YYYY-MM-DD
+        Returns DataFrame with at least: date, adjClose
+        """
+        params = {"from": start_date}
+        if end_date:
+            params["to"] = end_date
+
+        data = self._get(f"historical-price-full/{ticker}", params=params)
+
+        # FMP returns: {"symbol":"X", "historical":[...]}
+        if not data or "historical" not in data:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(data["historical"])
+        if df.empty:
+            return df
+
+        # FMP often returns 'adjClose'; if not, fall back to 'close'
+        if "adjClose" not in df.columns:
+            if "close" in df.columns:
+                df = df.rename(columns={"close": "adjClose"})
+            else:
+                return pd.DataFrame()
+
+        # Clean to required schema
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.sort_values("date")
+        return df[["date", "adjClose"]]
+
+
+
