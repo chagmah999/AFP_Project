@@ -172,7 +172,7 @@ class FactorPremiaForecaster:
         """
         Perform walk-forward validation and store summary metrics:
           - average RMSE, MAE, hit rate across folds for the ensemble
-          - average RMSE, MAE, hit rate across folds for an AR(1) baseline
+          - average RMSE, MAE, hit rate for a simple AR(1) time series baseline
 
         Direction hit rate is:
             mean( sign(pred) == sign(actual) )
@@ -181,7 +181,6 @@ class FactorPremiaForecaster:
         """
         print(f"\nWalk-forward validation for {target_factor}...")
 
-        # Build features and forward target y_t = forward H day premium
         X, y, features = self.prepare_features_targets(data, target_factor)
         if X.empty or y.empty:
             print(f"No data for factor {target_factor}")
@@ -191,8 +190,7 @@ class FactorPremiaForecaster:
             print("Insufficient data for walk-forward validation")
             return None
 
-        # Pre-compute lag of y within this cleaned sample
-        # y_lag_all[t] = y_{t-1}
+        # For AR(1) baseline we need lagged targets
         y_lag_all = y.shift(1)
 
         n_splits = 5
@@ -208,16 +206,12 @@ class FactorPremiaForecaster:
             X_test = X.iloc[train_end:test_end]
             y_test = y.iloc[train_end:test_end]
 
-            # Also slice lagged targets
-            y_train_lag = y_lag_all.iloc[:train_end]
-            y_test_lag = y_lag_all.iloc[train_end:test_end]
-
             if len(X_train) < 50 or len(X_test) < 10:
                 continue
 
-            # ----------------------------------------------------------
-            # 1) Train ensemble models (Ridge, Lasso, Random Forest)
-            # ----------------------------------------------------------
+            # -----------------------------
+            # 1) Train ensemble models
+            # -----------------------------
             self.train_models(X_train, y_train, target_factor)
 
             X_test_scaled = self.scalers[target_factor].transform(X_test)
@@ -228,14 +222,15 @@ class FactorPremiaForecaster:
             # Ensemble prediction (simple average)
             ensemble_pred = np.mean(list(predictions.values()), axis=0)
 
-            # ----------------------------------------------------------
-            # 2) AR(1) baseline on the forward factor premium
-            #    y_t = a + b * y_{t-1}
-            # ----------------------------------------------------------
-            # Use only rows where both y_t and y_{t-1} are non-null in TRAIN
-            mask_train = y_train.notna() & y_train_lag.notna()
-            y_curr = y_train[mask_train]
-            y_lag = y_train_lag[mask_train]
+            # -----------------------------
+            # 2) AR(1) baseline on y_t
+            # -----------------------------
+            # Fit y_t = a + b * y_{t-1} using training data only
+            y_train_lag = y_lag_all.iloc[:train_end]
+
+            mask = y_train.notna() & y_train_lag.notna()
+            y_curr = y_train[mask]
+            y_lag = y_train_lag[mask]
 
             if len(y_curr) >= 20:
                 # Simple OLS via polyfit: y ≈ b * y_lag + a
@@ -245,19 +240,21 @@ class FactorPremiaForecaster:
                 a = float(y_train.mean())
                 b = 0.0
 
-            # For TEST, use y_{t-1} as regressor
-            # If missing, fill with last non-null training y
-            if y_train.dropna().empty:
-                fallback_lag = 0.0
-            else:
-                fallback_lag = float(y_train.dropna().iloc[-1])
+            # For the test period, use y_{t-1} as regressor (can come from training or test)
+            y_lag_test = y_lag_all.iloc[train_end:test_end]
+            if y_lag_test.isna().any():
+                # Fill missing lags with last non-null training value
+                if y_train.dropna().empty:
+                    fallback = 0.0
+                else:
+                    fallback = float(y_train.dropna().iloc[-1])
+                y_lag_test = y_lag_test.fillna(fallback)
 
-            y_test_lag_filled = y_test_lag.fillna(fallback_lag)
-            ar1_pred = a + b * y_test_lag_filled.values
+            ar1_pred = a + b * y_lag_test.values
 
-            # ----------------------------------------------------------
+            # -----------------------------
             # 3) Collect fold-level metrics
-            # ----------------------------------------------------------
+            # -----------------------------
             fold = {
                 "factor": target_factor,
                 "fold": i,
@@ -311,7 +308,6 @@ class FactorPremiaForecaster:
             results.append(fold)
 
         if not results:
-            # If no valid folds, do not store anything
             return None
 
         results_df = pd.DataFrame(results)
@@ -338,6 +334,7 @@ class FactorPremiaForecaster:
         print(f"Average AR(1) Hit    : {summary['ar1_hit_rate']:.2%}")
 
         return results_df
+
 
 
 
