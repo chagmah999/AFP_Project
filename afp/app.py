@@ -359,6 +359,7 @@ else:
             )
 
         # Validation Summary
+        # 3. Validation summary (ensemble vs AR(1) baseline)
         if factor_eval:
             st.markdown("### Factor signal validation (walk-forward)")
 
@@ -370,6 +371,9 @@ else:
                         "Ensemble Hit Rate": s.get("ensemble_hit_rate", np.nan),
                         "Ensemble RMSE": s.get("ensemble_rmse", np.nan),
                         "Ensemble MAE": s.get("ensemble_mae", np.nan),
+                        "AR(1) Hit Rate": s.get("ar1_hit_rate", np.nan),
+                        "AR(1) RMSE": s.get("ar1_rmse", np.nan),
+                        "AR(1) MAE": s.get("ar1_mae", np.nan),
                     }
                 )
 
@@ -380,10 +384,14 @@ else:
                         "Ensemble Hit Rate": "{:.2%}",
                         "Ensemble RMSE": "{:.4f}",
                         "Ensemble MAE": "{:.4f}",
+                        "AR(1) Hit Rate": "{:.2%}",
+                        "AR(1) RMSE": "{:.4f}",
+                        "AR(1) MAE": "{:.4f}",
                     }
                 ),
                 use_container_width=True,
             )
+
     else:
         st.info("No factor forecasts available.")
 
