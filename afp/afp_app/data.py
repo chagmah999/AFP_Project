@@ -5,28 +5,55 @@ from datetime import datetime
 from .fmp import FMPDataFetcher
 
 
-def collect_fundamental_data(tickers: list[str], start_date: str, fetcher: FMPDataFetcher) -> dict[str, pd.DataFrame]:
-    bs_all, inc_all, cf_all = [], [], []
-    for i, t in enumerate(tickers, 1):
-        try:
-            bs = fetcher.fetch_balance_sheet(t, period="quarter", limit=20)
-            inc = fetcher.fetch_income_statement(t, period="quarter", limit=20)
-            cf  = fetcher.fetch_cash_flow(t, period="quarter", limit=20)
-            if not bs.empty:
-                bs_all.append(bs[bs["date"] >= start_date])
-            if not inc.empty:
-                inc_all.append(inc[inc["date"] >= start_date])
-            if not cf.empty:
-                cf_all.append(cf[cf["date"] >= start_date])
-        except Exception as e:
-            print(f"[warn] fundamentals {t}: {e}")
-        if i % 5 == 0:
-            time.sleep(0.1)
+
+def collect_fundamental_data(tickers, start_date, fetcher):
+    bs_rows = []
+    inc_rows = []
+    cf_rows = []
+    profile_rows = []
+
+    for tk in tickers:
+        # Fetch fundamentals
+        bs = fetcher.get_balance_sheet(tk)
+        inc = fetcher.get_income_statement(tk)
+        cf = fetcher.get_cash_flow(tk)
+
+        # Fetch metadata (sector, industry)
+        prof = fetcher.get_profile(tk)
+        if prof:
+            profile_rows.append(prof)
+
+        if isinstance(bs, list):
+            for row in bs:
+                row["ticker"] = tk
+                bs_rows.append(row)
+        if isinstance(inc, list):
+            for row in inc:
+                row["ticker"] = tk
+                inc_rows.append(row)
+        if isinstance(cf, list):
+            for row in cf:
+                row["ticker"] = tk
+                cf_rows.append(row)
+
+    # Convert to DataFrames
+    bs_df = pd.DataFrame(bs_rows)
+    inc_df = pd.DataFrame(inc_rows)
+    cf_df = pd.DataFrame(cf_rows)
+    profile_df = pd.DataFrame(profile_rows)
+
+    # Merge sector/industry into each fundamental table
+    if not profile_df.empty:
+        bs_df = bs_df.merge(profile_df, on="ticker", how="left")
+        inc_df = inc_df.merge(profile_df, on="ticker", how="left")
+        cf_df = cf_df.merge(profile_df, on="ticker", how="left")
+
     return {
-        "balance_sheet": pd.concat(bs_all, ignore_index=True) if bs_all else pd.DataFrame(),
-        "income_statement": pd.concat(inc_all, ignore_index=True) if inc_all else pd.DataFrame(),
-        "cash_flow": pd.concat(cf_all, ignore_index=True) if cf_all else pd.DataFrame(),
+        "balance_sheet": bs_df,
+        "income_statement": inc_df,
+        "cash_flow": cf_df,
     }
+
 
 def collect_price_data(tickers: list[str], start_date: str, end_date: str | None, fetcher: FMPDataFetcher) -> pd.DataFrame:
     frames = []
