@@ -40,9 +40,14 @@ for key, default in [
     ("modeling_frame", None),
     ("forecaster_obj", None),
     ("stress_model_obj", None),
+    # new: store universe and factor score info for later display
+    ("universe_tickers", None),
+    ("factor_portfolio_sizes", None),
+    ("sample_factor_scores", None),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
+
 
 # -------------------------------------------------------------
 # Sidebar
@@ -112,6 +117,7 @@ if run_btn:
         st.stop()
 
     # ------------------ Universe ------------------
+        # ------------------ Universe ------------------
     status.info("Selecting universe...")
     tickers = get_universe(
         universe_size,
@@ -119,8 +125,9 @@ if run_btn:
         seed=int(seed),
     )
 
-    st.write(f"Universe of {len(tickers)} tickers:")
-    st.dataframe(pd.DataFrame({"ticker": tickers}), use_container_width=True)
+    # Store universe for later display instead of showing it first
+    st.session_state["universe_tickers"] = tickers
+
 
     # ------------------ Data Collection ------------------
     status.info("Fetching fundamentals and prices...")
@@ -144,6 +151,9 @@ if run_btn:
     factor_returns = pd.DataFrame()
     if metrics.empty:
         st.warning("No factor metrics available. Check fundamentals coverage.")
+        # Also clear any old stored portfolio info
+        st.session_state["factor_portfolio_sizes"] = None
+        st.session_state["sample_factor_scores"] = None
     else:
         ctor = FactorPortfolioConstructor(metrics, prices)
         portfolios = ctor.construct_all()
@@ -153,17 +163,12 @@ if run_btn:
             for k, v in portfolios.items()
         }
 
-        st.subheader("Factor portfolios (size of long plus short)")
-        st.json(port_sizes)
-
         factor_returns = ctor.calculate_factor_returns(
             start_date,
             prices["date"].max().strftime("%Y-%m-%d"),
         )
 
-        # ------- Sample stock-level 0 to 1 factor scores (for reference) -------
-        st.subheader("Sample stock-level factor scores (0 to 1)")
-
+        # Build latest per ticker scores for later display
         latest = (
             metrics.sort_values("date")
             .groupby("ticker")
@@ -188,9 +193,13 @@ if run_btn:
                 .sort_values("ticker")
                 .head(30)
             )
-            st.dataframe(sample, use_container_width=True)
         else:
-            st.info("No stock-level factor scores to display.")
+            sample = None
+
+        # Store details in session state instead of showing them first
+        st.session_state["factor_portfolio_sizes"] = port_sizes
+        st.session_state["sample_factor_scores"] = sample
+
 
     # ------------------ Macro Data & Modeling Frame ------------------
     status.info("Fetching macro data...")
@@ -390,6 +399,30 @@ else:
                 )
     else:
         st.info("No factor forecasts available.")
+
+    # =========================================================
+    # 1.b Universe and factor score details (after premia)
+    # =========================================================
+    with st.expander("Show universe and stock-level factor scores (details)"):
+        uni = st.session_state.get("universe_tickers")
+        port_sizes = st.session_state.get("factor_portfolio_sizes")
+        sample_scores = st.session_state.get("sample_factor_scores")
+
+        if uni:
+            st.markdown(f"**Universe size**: {len(uni)}")
+            st.dataframe(
+                pd.DataFrame({"ticker": uni}),
+                use_container_width=True,
+            )
+
+        if port_sizes:
+            st.markdown("**Factor portfolios (size of long plus short)**")
+            st.json(port_sizes)
+
+        if isinstance(sample_scores, pd.DataFrame) and not sample_scores.empty:
+            st.markdown("**Sample stock-level factor scores (0 to 1)**")
+            st.dataframe(sample_scores, use_container_width=True)
+
 
     # =========================================================
     # 2. Alpha predictions
