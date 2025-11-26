@@ -34,14 +34,16 @@ def calculate_factor_metrics(
         return pd.DataFrame()
 
     # ---------------- Merge fundamentals ----------------
+        # Columns to keep from balance sheet, including optional sector metadata if present
     bs_cols = [
-        "ticker",
-        "date",
+        "ticker", "date",
         "totalStockholdersEquity",
         "totalAssets",
         "totalLiabilities",
         "totalDebt",
         "cashAndCashEquivalents",
+        # common share count if available
+        "commonStockSharesOutstanding",
     ]
     for meta_col in ["sector", "industry"]:
         if meta_col in bs.columns:
@@ -49,17 +51,21 @@ def calculate_factor_metrics(
 
     bs_use = bs[bs_cols].copy()
 
+    # Income statement
     inc_cols = [
-        "ticker",
-        "date",
+        "ticker", "date",
         "revenue",
         "netIncome",
         "grossProfit",
         "operatingIncome",
         "eps",
         "ebitda",
+        # some FMP endpoints put share counts here instead
+        "weightedAverageShsOut",
+        "weightedAverageShsOutDil",
     ]
     inc_use = inc[inc_cols].copy()
+
 
     metrics = pd.merge(
         bs_use,
