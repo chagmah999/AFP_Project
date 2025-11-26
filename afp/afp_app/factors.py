@@ -99,14 +99,42 @@ def calculate_factor_metrics(
         )
 
     # ---------------- Fundamental ratios ----------------
-    metrics["book_equity"] = metrics["totalStockholdersEquity"]
-
-    # Simplified value proxy (consistent with earlier codebase)
-    metrics["earnings_yield"] = _safe_div(
-        metrics["netIncome"],
-        metrics["totalAssets"],
+    metrics["book_equity"] = pd.to_numeric(
+        metrics["totalStockholdersEquity"], errors="coerce"
     )
 
+    # Build a latest price per ticker so we can get price / market cap
+    if not price_data.empty:
+        last_price = (
+            price_data.sort_values("date")
+            .groupby("ticker")["adjClose"]
+            .last()
+        )
+        metrics["price_last"] = metrics["ticker"].map(last_price)
+    else:
+        metrics["price_last"] = np.nan
+
+    # Market cap = shares_out * last price (if both exist)
+    metrics["market_cap"] = _safe_div(
+        metrics["shares_out"] * metrics["price_last"],
+        1.0,
+    )
+
+    # Value building blocks: B/P, E/P, FCF/P (implemented as B/M, E/M, FCF/M)
+    metrics["bp_ratio"] = _safe_div(
+        metrics["book_equity"],
+        metrics["market_cap"],
+    )
+    metrics["ep_ratio"] = _safe_div(
+        metrics["netIncome"],
+        metrics["market_cap"],
+    )
+    metrics["fcfp_ratio"] = _safe_div(
+        metrics.get("freeCashFlow", np.nan),
+        metrics["market_cap"],
+    )
+
+    # Profitability / quality style ratios (unchanged logic)
     metrics["roe"] = _safe_div(
         metrics["netIncome"],
         metrics["totalStockholdersEquity"],
@@ -127,6 +155,7 @@ def calculate_factor_metrics(
         metrics["totalDebt"],
         metrics["totalStockholdersEquity"],
     )
+
 
     # ---------------- Momentum and volatility from price data ----------------
     if price_data.empty:
@@ -181,9 +210,48 @@ def calculate_factor_metrics(
         else:
             return _rank_pct(metrics[col_name], ascending=ascending)
 
-    # VALUE: high earnings_yield = cheap
-    if "earnings_yield" in metrics.columns:
-        metrics["value_score"] = _group_rank("earnings_yield", ascending=True)
+    # ---------------- VALUE factor from z-scores of B/P, E/P, FCF/P ----------------
+    def _zscore_grouped(series: pd.Series) -> pd.Series:
+        mu = series.mean()
+        sigma = series.std(ddof=0)
+        if sigma == 0 or np.isnan(sigma):
+            return pd.Series(index=series.index, data=np.nan)
+        return (series - mu) / sigma
+
+    value_components = []
+
+    if "bp_ratio" in metrics.columns:
+        metrics["z_bp"] = (
+            metrics.groupby(group_cols)["bp_ratio"]
+            .transform(_zscore_grouped)
+        )
+        value_components.append("z_bp")
+
+    if "ep_ratio" in metrics.columns:
+        metrics["z_ep"] = (
+            metrics.groupby(group_cols)["ep_ratio"]
+            .transform(_zscore_grouped)
+        )
+        value_components.append("z_ep")
+
+    if "fcfp_ratio" in metrics.columns:
+        metrics["z_fcfp"] = (
+            metrics.groupby(group_cols)["fcfp_ratio"]
+            .transform(_zscore_grouped)
+        )
+        value_components.append("z_fcfp")
+
+    # Raw value signal = average of z-scores of B/P, E/P, FCF/P
+    if value_components:
+        metrics["value_raw"] = metrics[value_components].mean(axis=1, skipna=True)
+
+        # Map raw value signal to 0–1 percentile within industry/date
+        # Higher value_raw (cheaper stocks) should get higher score
+        metrics["value_score"] = (
+            metrics.groupby(group_cols)["value_raw"]
+            .transform(lambda s: s.rank(method="average", pct=True, ascending=False))
+        )
+
 
     # QUALITY: average of ROE, ROA, margins, inverse leverage
     quality_components = []
