@@ -74,6 +74,20 @@ def calculate_factor_metrics(
         how="inner",
     )
 
+    # Unified shares outstanding (try several possible columns)
+    share_candidates = [
+        "commonStockSharesOutstanding",
+        "weightedAverageShsOut",
+        "weightedAverageShsOutDil",
+    ]
+    metrics["shares_out"] = np.nan
+    for col in share_candidates:
+        if col in metrics.columns:
+            metrics["shares_out"] = metrics["shares_out"].fillna(
+                pd.to_numeric(metrics[col], errors="coerce")
+            )
+
+
     if not cf.empty:
         cf_cols = ["ticker", "date", "freeCashFlow", "operatingCashFlow"]
         cf_use = cf[cf_cols].copy()
