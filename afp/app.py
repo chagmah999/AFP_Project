@@ -126,17 +126,10 @@ if run_btn:
     fetcher = FMPDataFetcher(api_key=api_key)
     fundamentals = collect_fundamental_data(tickers, start_date, fetcher)
     prices = collect_price_data(tickers, start_date, None, fetcher)
-    
-    st.write("Debug: prices.shape =", getattr(prices, "shape", None))
-    st.write(prices.head())
-    if prices is None:
-        st.error("collect_price_data returned None")
-        st.stop()
-    
-    if isinstance(prices, pd.DataFrame) and prices.empty:
+
+    if prices is None or not isinstance(prices, pd.DataFrame) or prices.empty:
         st.error("No price data returned. Check API key, tickers, or date range.")
         st.stop()
-
 
     st.success(
         f"Collected {len(prices)} price rows. "
@@ -150,7 +143,6 @@ if run_btn:
     if metrics.empty:
         st.warning("No factor metrics available. Check fundamentals coverage.")
     else:
-        st.subheader("Factor portfolios (size of long+short)")
         ctor = FactorPortfolioConstructor(metrics, prices)
         portfolios = ctor.construct_all()
 
@@ -158,14 +150,16 @@ if run_btn:
             k: (0 if v is None or v.empty else len(v))
             for k, v in portfolios.items()
         }
-        st.json(port_sizes)
+
+        with st.expander("Show factor portfolio sizes (long + short)", expanded=False):
+            st.json(port_sizes)
 
         factor_returns = ctor.calculate_factor_returns(
             start_date,
             prices["date"].max().strftime("%Y-%m-%d"),
         )
 
-        # ------- Show Sample Stock-Level 0–1 Factor Scores -------
+        # ------- Sample Stock-Level 0–1 Factor Scores -------
         st.subheader("Sample stock-level factor scores (0–1)")
 
         latest = (
@@ -176,7 +170,8 @@ if run_btn:
         )
 
         score_cols = [
-            c for c in [
+            c
+            for c in [
                 "value_score",
                 "quality_score",
                 "momentum_score",
@@ -221,12 +216,12 @@ if run_btn:
     factor_eval = {}
 
     for f in factors:
-        # Walk-forward validation (stores RMSE, MAE, hit rate)
+        # Walk-forward validation (stores RMSE, MAE, hit rate, AR(1) baseline)
         val = forecaster.walk_forward_validation(modeling, f)
         if val is not None:
             factor_eval[f] = forecaster.validation_summary.get(f, {})
 
-        # Forward forecast
+        # Forward forecast (ensemble currently used for the premium forecast)
         fc = forecaster.forecast_next(modeling, f)
         if fc:
             fc["top_drivers"] = (fc.get("top_drivers") or [])[:top_k_drivers]
@@ -275,6 +270,7 @@ if run_btn:
 
     t1 = time.time()
     st.success(f"Pipeline completed in {t1 - t0:.1f} seconds.")
+
 # -------------------------------------------------------------
 # Display Section (Persists after running pipeline)
 # -------------------------------------------------------------
@@ -290,55 +286,33 @@ recs = st.session_state.get("base_recs")
 if not forecasts and not alpha_preds and not stress_fc:
     st.info("Run the pipeline from the sidebar to generate forecasts.")
 else:
-
-    # ------------------ Stress ------------------
-    st.subheader("Stress regime")
-
-    if stress_fc:
-        line = (
-            f"Regime: **{stress_fc['regime']}**  |  "
-            f"Stress probability: **{stress_fc['stress_probability']*100:.1f}%**"
-        )
-
-        auc = getattr(stress, "cv_auc_mean", None)
-        share = getattr(stress, "stress_share", None)
-
-        if auc is not None:
-            line += f"  |  Model AUC: **{auc:.3f}**"
-        if share is not None:
-            line += f"  |  Historical stress frequency: **{share*100:.1f}%**"
-
-        st.write(line)
-
-        # Key indicators table
-        key_ind = stress_fc.get("key_indicators", {})
-        if key_ind:
-            st.markdown("Key indicators at latest date:")
-            df_ind = pd.DataFrame(
-                [{"Indicator": k, "Value": v} for k, v in key_ind.items()]
-            )
-            st.dataframe(
-                df_ind.style.format({"Value": "{:.3f}"}),
-                use_container_width=True,
-            )
-    else:
-        st.info("No stress regime forecast available.")
-
-    # ------------------ Factor Premia Forecasts ------------------
+    # =============================================================
+    # 1) Factor premia forecasts (FIRST VIEW)
+    # =============================================================
     st.subheader("Factor premia forecasts")
 
     if forecasts:
-        # Summary table
+        # 1. Summary table (ensemble forecast used for now)
         summary_rows = []
-        drivers_rows = []
-
         for f, v in forecasts.items():
             summary_rows.append(
                 {
                     "Factor": f,
-                    "Expected Premium %": v["ensemble_forecast"] * 100.0,
+                    "Expected Premium % (ensemble)": v["ensemble_forecast"] * 100.0,
                 }
             )
+
+        df_summary = pd.DataFrame(summary_rows).sort_values(
+            "Expected Premium % (ensemble)", ascending=False
+        )
+        st.dataframe(
+            df_summary.style.format({"Expected Premium % (ensemble)": "{:.2f}"}),
+            use_container_width=True,
+        )
+
+        # 2. Driver importance table (hidden in expander, since RF-based)
+        drivers_rows = []
+        for f, v in forecasts.items():
             for d in (v.get("top_drivers") or []):
                 drivers_rows.append(
                     {
@@ -348,49 +322,45 @@ else:
                     }
                 )
 
-        df_summary = pd.DataFrame(summary_rows).sort_values(
-            "Expected Premium %", ascending=False
-        )
-        st.dataframe(
-            df_summary.style.format({"Expected Premium %": "{:.2f}"}),
-            use_container_width=True,
-        )
-
-        # Driver importance table
         if drivers_rows:
-            st.markdown("Top drivers per factor")
-            df_drivers = pd.DataFrame(drivers_rows)
-            st.dataframe(
-                df_drivers.style.format({"RF Importance": "{:.3f}"}),
-                use_container_width=True,
-            )
+            with st.expander("Show top macro drivers (Ridge/Lasso/RF ensemble)", expanded=False):
+                df_drivers = pd.DataFrame(drivers_rows)
+                st.dataframe(
+                    df_drivers.style.format({"RF Importance": "{:.3f}"}),
+                    use_container_width=True,
+                )
 
-        # Validation Summary
-        # 3. Validation summary (ensemble vs AR(1) baseline)
+        # 3. Validation summary
         if factor_eval:
             st.markdown("### Factor signal validation (walk-forward)")
 
-            eval_rows = []
+            # AR(1) metrics up front
+            ar1_rows = []
+            ens_rows = []
+
             for f, s in factor_eval.items():
-                eval_rows.append(
+                ar1_rows.append(
                     {
                         "Factor": f,
-                        "Ensemble Hit Rate": s.get("ensemble_hit_rate", np.nan),
-                        "Ensemble RMSE": s.get("ensemble_rmse", np.nan),
-                        "Ensemble MAE": s.get("ensemble_mae", np.nan),
                         "AR(1) Hit Rate": s.get("ar1_hit_rate", np.nan),
                         "AR(1) RMSE": s.get("ar1_rmse", np.nan),
                         "AR(1) MAE": s.get("ar1_mae", np.nan),
                     }
                 )
-
-            df_eval = pd.DataFrame(eval_rows)
-            st.dataframe(
-                df_eval.style.format(
+                ens_rows.append(
                     {
-                        "Ensemble Hit Rate": "{:.2%}",
-                        "Ensemble RMSE": "{:.4f}",
-                        "Ensemble MAE": "{:.4f}",
+                        "Factor": f,
+                        "Ensemble Hit Rate": s.get("ensemble_hit_rate", np.nan),
+                        "Ensemble RMSE": s.get("ensemble_rmse", np.nan),
+                        "Ensemble MAE": s.get("ensemble_mae", np.nan),
+                    }
+                )
+
+            df_ar1 = pd.DataFrame(ar1_rows)
+            st.markdown("**AR(1) baseline performance (primary signal validation)**")
+            st.dataframe(
+                df_ar1.style.format(
+                    {
                         "AR(1) Hit Rate": "{:.2%}",
                         "AR(1) RMSE": "{:.4f}",
                         "AR(1) MAE": "{:.4f}",
@@ -399,10 +369,25 @@ else:
                 use_container_width=True,
             )
 
+            # Ensemble diagnostics in a collapsible section
+            with st.expander("Show ensemble (Ridge / Lasso / RF) diagnostics", expanded=False):
+                df_ens = pd.DataFrame(ens_rows)
+                st.dataframe(
+                    df_ens.style.format(
+                        {
+                            "Ensemble Hit Rate": "{:.2%}",
+                            "Ensemble RMSE": "{:.4f}",
+                            "Ensemble MAE": "{:.4f}",
+                        }
+                    ),
+                    use_container_width=True,
+                )
     else:
         st.info("No factor forecasts available.")
 
-    # ------------------ Alpha Predictions ------------------
+    # =============================================================
+    # 2) Alpha predictions
+    # =============================================================
     st.subheader("Alpha predictions (top 10)")
 
     if alpha_preds:
@@ -446,29 +431,67 @@ else:
             pass
 
         # Driver details for each top 10 stock
-        st.markdown("Top drivers for each of the top 10 stocks")
-        for _, row in df_alpha.head(10).iterrows():
-            tk = row["ticker"]
-            alpha_val = row["expected_alpha_%"]
-            feats = row["top_features"]
+        with st.expander("Show top drivers for each of the top 10 stocks", expanded=False):
+            for _, row in df_alpha.head(10).iterrows():
+                tk = row["ticker"]
+                alpha_val = row["expected_alpha_%"]
+                feats = row["top_features"]
 
-            with st.expander(f"{tk} — {alpha_val:.2f}%"):
-                if feats:
-                    df_feats = pd.DataFrame(feats)
-                    if "coef" in df_feats.columns:
-                        df_feats.rename(columns={"coef": "Coefficient"}, inplace=True)
-                    st.dataframe(df_feats, use_container_width=True)
-                else:
-                    st.write("No feature importances available for this ticker.")
+                with st.expander(f"{tk} — {alpha_val:.2f}%"):
+                    if feats:
+                        df_feats = pd.DataFrame(feats)
+                        if "coef" in df_feats.columns:
+                            df_feats.rename(columns={"coef": "Coefficient"}, inplace=True)
+                        st.dataframe(df_feats, use_container_width=True)
+                    else:
+                        st.write("No feature importances available for this ticker.")
     else:
         st.info("No alpha predictions available.")
 
-    # ------------------ Integrated Recommendations ------------------
+    # =============================================================
+    # 3) Stress regime
+    # =============================================================
+    st.subheader("Stress regime")
+
+    if stress_fc:
+        line = (
+            f"Regime: **{stress_fc['regime']}**  |  "
+            f"Stress probability: **{stress_fc['stress_probability']*100:.1f}%**"
+        )
+
+        auc = getattr(stress, "cv_auc_mean", None)
+        share = getattr(stress, "stress_share", None)
+
+        if auc is not None:
+            line += f"  |  Model AUC: **{auc:.3f}**"
+        if share is not None:
+            line += f"  |  Historical stress frequency: **{share*100:.1f}%**"
+
+        st.write(line)
+
+        # Key indicators table
+        key_ind = stress_fc.get("key_indicators", {})
+        if key_ind:
+            st.markdown("Key indicators at latest date:")
+            df_ind = pd.DataFrame(
+                [{"Indicator": k, "Value": v} for k, v in key_ind.items()]
+            )
+            st.dataframe(
+                df_ind.style.format({"Value": "{:.3f}"}),
+                use_container_width=True,
+            )
+    else:
+        st.info("No stress regime forecast available.")
+
+    # =============================================================
+    # 4) Integrated recommendations
+    # =============================================================
     st.subheader("Integrated recommendations")
     if recs:
         st.json(recs)
     else:
         st.info("No integrated recommendations available.")
+
 # -------------------------------------------------------------
 # Sensitivity Analysis (uses stored base results)
 # -------------------------------------------------------------
@@ -493,11 +516,7 @@ if forecasts and modeling is not None and forecaster and stress:
 
     # Reset function
     def _reset_sensitivity():
-        """
-        Reset slider values to zero. After resetting we re-render
-        the section but do NOT delete session_state keys so the app
-        does not break.
-        """
+        """Reset slider values to zero."""
         for k in SENS_KEYS:
             st.session_state[k] = 0
 
