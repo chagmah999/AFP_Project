@@ -1,97 +1,188 @@
 # afp_app/optimizer.py
 
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
-# --- Ensure cvxpy is installed ---
-import importlib
-import subprocess
-import sys
-
-def ensure_cvxpy():
-    if importlib.util.find_spec("cvxpy") is None:
-        try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "cvxpy"])
-        except Exception as e:
-            raise RuntimeError(f"Could not install cvxpy: {e}")
-
-ensure_cvxpy()
-
-import cvxpy as cp
 
 
 class UnifiedPortfolioOptimizer:
     """
-    Build a single unified long/short portfolio using:
-      - forecasted factor premia (dict of factor → premium)
-      - stock-level factor exposures (from factor metrics)
+    Build a unified optimized portfolio over the stock universe using
+    the per ticker alpha forecasts and historical covariance.
+
+    This version intentionally avoids cvxpy and uses a simple
+    Markowitz style maximum Sharpe solution with basic constraints.
+
+    High level:
+      1) Construct expected alpha vector μ from alpha_preds
+      2) Estimate covariance matrix Σ from recent daily returns
+      3) Compute tangency style weights w ∝ Σ^{-1} μ
+      4) Optionally project to long only and normalize to sum to 1
     """
 
-    def __init__(
+    def __init__(self, lookback_days: int = 252):
+        self.lookback_days = lookback_days
+
+    # ---------------------------------------------------------
+    # Build inputs: expected alpha vector and covariance matrix
+    # ---------------------------------------------------------
+    def build_inputs(
         self,
-        max_gross=1.0,
-        max_weight=0.05,
-        risk_aversion=1.0,
-    ):
-        self.max_gross = max_gross
-        self.max_weight = max_weight
-        self.risk_aversion = risk_aversion
-
-    def build_expected_returns(self, metrics_df, forecasts):
+        alpha_preds: dict,
+        price_data: pd.DataFrame,
+    ) -> tuple[pd.Series, pd.DataFrame | None]:
         """
-        Expected stock return = sum_k (forecast_k * exposure_i,k)
+        From:
+          alpha_preds: dict[ticker -> alpha_pred_dict]
+              where alpha_pred_dict["expected_alpha"] is the H day excess alpha
+
+          price_data: daily price DataFrame with columns:
+              ["date", "ticker", "returns", "adjClose", ...]
+
+        Returns:
+          exp_alpha: pd.Series indexed by ticker with expected alpha
+          cov: pd.DataFrame covariance matrix of daily returns
         """
-        betas = {}
+        if not alpha_preds:
+            return pd.Series(dtype=float), None
 
-        for factor, fc in forecasts.items():
-            prem = fc.get("ar1_forecast", None)
-            if prem is None:
-                prem = fc.get("ensemble_forecast", 0.0)
+        # Build expected alpha vector
+        exp_alpha = pd.Series(
+            {
+                tk: v.get("expected_alpha", np.nan)
+                for tk, v in alpha_preds.items()
+            },
+            dtype=float,
+        )
+        exp_alpha = exp_alpha.replace([np.inf, -np.inf], np.nan).dropna()
+        if exp_alpha.empty:
+            return exp_alpha, None
 
-            col = {
-                "VALUE": "value_score",
-                "QUALITY": "quality_score",
-                "MOMENTUM": "momentum_score",
-                "LOW_VOL": "lowvol_score",
-            }.get(factor)
+        tickers = exp_alpha.index.tolist()
 
-            if col in metrics_df.columns:
-                betas[factor] = metrics_df[col].fillna(0.0) * prem
+        if price_data is None or price_data.empty:
+            return exp_alpha, None
 
-        # Sum contributions across factors → expected return per stock
-        er = pd.DataFrame(betas).sum(axis=1)
-        return er.values.reshape(-1), betas
+        px = price_data[price_data["ticker"].isin(tickers)].copy()
+        if px.empty:
+            return exp_alpha, None
 
-    def optimize(self, expected_returns, cov_matrix, tickers):
+        # Restrict to recent window for covariance estimation
+        px = px.sort_values("date")
+        if "date" in px.columns:
+            last_date = px["date"].max()
+            cutoff = last_date - pd.Timedelta(days=self.lookback_days)
+            px = px[px["date"] >= cutoff]
+
+        # Pivot to date x ticker returns matrix
+        ret_pivot = px.pivot_table(
+            index="date",
+            columns="ticker",
+            values="returns",
+        )
+
+        # Drop dates that are all NaN
+        ret_pivot = ret_pivot.dropna(how="all")
+        if ret_pivot.empty:
+            return exp_alpha, None
+
+        cov = ret_pivot.cov()
+
+        # Align rows/cols to alpha tickers
+        cov = cov.reindex(index=tickers, columns=tickers)
+
+        return exp_alpha, cov
+
+    # ---------------------------------------------------------
+    # Core optimizer: Markowitz tangency style
+    # ---------------------------------------------------------
+    def optimize(
+        self,
+        exp_alpha: pd.Series,
+        cov: pd.DataFrame | None,
+        long_only: bool = True,
+    ) -> pd.Series:
         """
-        Max Sharpe portfolio under:
-           1. dollar neutrality
-           2. gross exposure ≤ max_gross
-           3. |w_i| ≤ max_weight
-        """
+        Compute portfolio weights.
 
+        If covariance is unavailable or singular, falls back to equal weight.
+
+        Constraints:
+          - Sum of weights = 1
+          - If long_only = True then w_i >= 0 for all i
+        """
+        tickers = exp_alpha.index.tolist()
         n = len(tickers)
-        w = cp.Variable(n)
 
-        expected_port_return = expected_returns @ w
-        port_var = cp.quad_form(w, cov_matrix)
+        if cov is None or cov.empty:
+            # Fallback: equal weight
+            return pd.Series(
+                np.ones(n) / n,
+                index=tickers,
+                name="weight",
+            )
 
-        objective = cp.Maximize(expected_port_return - self.risk_aversion * port_var)
+        # Replace NaNs with zero to avoid numerical issues
+        cov = cov.fillna(0.0)
 
-        constraints = [
-            cp.sum(w) == 0,                               # dollar neutral
-            cp.norm1(w) <= self.max_gross,                # leverage limit
-            w <= self.max_weight,
-            w >= -self.max_weight,
-        ]
+        mu = exp_alpha.values
+        try:
+            inv_cov = np.linalg.pinv(cov.values)
+        except Exception:
+            # Fallback if inversion fails
+            return pd.Series(
+                np.ones(n) / n,
+                index=tickers,
+                name="weight",
+            )
 
-        prob = cp.Problem(objective, constraints)
-        prob.solve(solver=cp.OSQP)
+        # Unconstrained tangency weights (up to scale)
+        raw_w = inv_cov @ mu
 
-        if w.value is None:
-            return pd.DataFrame()
+        if long_only:
+            raw_w = np.maximum(raw_w, 0.0)
 
-        return pd.DataFrame({
-            "ticker": tickers,
-            "weight": w.value,
-            "expected_return": expected_returns * w.value
-        }).sort_values("weight", ascending=False)
+        if not np.any(np.isfinite(raw_w)) or np.all(raw_w == 0):
+            return pd.Series(
+                np.ones(n) / n,
+                index=tickers,
+                name="weight",
+            )
+
+        # Normalize to sum to 1
+        w = raw_w / np.sum(raw_w)
+
+        return pd.Series(w, index=tickers, name="weight")
+
+    # ---------------------------------------------------------
+    # High level helper: from alpha_preds + price_data
+    # ---------------------------------------------------------
+    def build_portfolio(
+        self,
+        alpha_preds: dict,
+        price_data: pd.DataFrame,
+        long_only: bool = True,
+    ) -> dict | None:
+        """
+        Convenience wrapper:
+
+        1) Build expected alpha vector and covariance
+        2) Optimize to get weights
+        3) Return a dict with weights and expected alpha per ticker
+
+        Returns None if inputs are empty.
+        """
+        exp_alpha, cov = self.build_inputs(alpha_preds, price_data)
+        if exp_alpha.empty:
+            return None
+
+        weights = self.optimize(exp_alpha, cov, long_only=long_only)
+
+        # Align expected alpha to the same index as weights
+        exp_alpha_aligned = exp_alpha.reindex(weights.index)
+
+        return {
+            "weights": weights.sort_values(ascending=False),
+            "expected_alpha": exp_alpha_aligned,
+        }
