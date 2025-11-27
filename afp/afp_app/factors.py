@@ -43,7 +43,7 @@ def calculate_factor_metrics(
         "totalDebt",
         "cashAndCashEquivalents",
         # common share count if available
-        "commonStock",
+        "commonStockSharesOutstanding",
     ]
     for meta_col in ["sector", "industry"]:
         if meta_col in bs.columns:
@@ -76,7 +76,7 @@ def calculate_factor_metrics(
 
     # Unified shares outstanding (try several possible columns)
     share_candidates = [
-        "commonStock",
+        "commonStockSharesOutstanding",
         "weightedAverageShsOut",
         "weightedAverageShsOutDil",
     ]
