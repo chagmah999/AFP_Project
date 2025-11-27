@@ -18,11 +18,31 @@ class UnifiedPortfolioOptimizer:
       1) Construct expected alpha vector μ from alpha_preds
       2) Estimate covariance matrix Σ from recent daily returns
       3) Compute tangency style weights w ∝ Σ^{-1} μ
-      4) Optionally project to long only and normalize to sum to 1
+      4) Apply simple constraints:
+           - long_only: clamp to w_i >= 0, normalize to sum to 1
+           - if not long_only: scale so that sum(|w_i|) <= max_gross
     """
 
-    def __init__(self, lookback_days: int = 252):
+    def __init__(
+        self,
+        lookback_days: int = 252,
+        max_gross: float = 1.0,
+        long_only: bool = True,
+    ):
+        """
+        Parameters
+        ----------
+        lookback_days : int
+            Number of calendar days of history to use for covariance.
+        max_gross : float
+            Maximum gross exposure (sum of absolute weights) if allowing
+            long/short. For a long-only portfolio this is effectively 1.
+        long_only : bool
+            If True, enforce w_i >= 0 and sum(w) = 1.
+        """
         self.lookback_days = lookback_days
+        self.max_gross = max_gross
+        self.long_only = long_only
 
     # ---------------------------------------------------------
     # Build inputs: expected alpha vector and covariance matrix
@@ -101,7 +121,7 @@ class UnifiedPortfolioOptimizer:
         self,
         exp_alpha: pd.Series,
         cov: pd.DataFrame | None,
-        long_only: bool = True,
+        long_only: bool | None = None,
     ) -> pd.Series:
         """
         Compute portfolio weights.
@@ -109,9 +129,13 @@ class UnifiedPortfolioOptimizer:
         If covariance is unavailable or singular, falls back to equal weight.
 
         Constraints:
-          - Sum of weights = 1
-          - If long_only = True then w_i >= 0 for all i
+          - Sum of weights = 1 if long_only is True
+          - If long_only True: w_i >= 0
+          - If long_only False: scale so sum(|w_i|) <= max_gross
         """
+        if long_only is None:
+            long_only = self.long_only
+
         tickers = exp_alpha.index.tolist()
         n = len(tickers)
 
@@ -143,6 +167,7 @@ class UnifiedPortfolioOptimizer:
         if long_only:
             raw_w = np.maximum(raw_w, 0.0)
 
+        # If everything got clamped to zero or is non-finite, fall back
         if not np.any(np.isfinite(raw_w)) or np.all(raw_w == 0):
             return pd.Series(
                 np.ones(n) / n,
@@ -150,8 +175,21 @@ class UnifiedPortfolioOptimizer:
                 name="weight",
             )
 
-        # Normalize to sum to 1
-        w = raw_w / np.sum(raw_w)
+        if long_only:
+            # Normalize to sum to 1
+            w = raw_w / np.sum(raw_w)
+        else:
+            # Allow long/short but cap gross exposure
+            gross = np.sum(np.abs(raw_w))
+            if gross > 0:
+                w = raw_w / gross
+            else:
+                w = raw_w
+
+            if self.max_gross is not None and self.max_gross > 0:
+                gross = np.sum(np.abs(w))
+                if gross > self.max_gross:
+                    w = w * (self.max_gross / gross)
 
         return pd.Series(w, index=tickers, name="weight")
 
@@ -162,7 +200,7 @@ class UnifiedPortfolioOptimizer:
         self,
         alpha_preds: dict,
         price_data: pd.DataFrame,
-        long_only: bool = True,
+        long_only: bool | None = None,
     ) -> dict | None:
         """
         Convenience wrapper:
