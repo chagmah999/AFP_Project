@@ -1,4 +1,4 @@
-import os
+ import os
 import time
 import numpy as np
 import pandas as pd
@@ -46,7 +46,10 @@ for key, default in [
     ("universe_tickers", None),
     ("factor_portfolio_sizes", None),
     ("sample_factor_scores", None),
+    # new: store optimized unified portfolio table
+    ("optimized_portfolio", None),
 ]:
+
     if key not in st.session_state:
         st.session_state[key] = default
 
@@ -267,50 +270,50 @@ if run_btn:
     st.session_state["base_alpha"] = alpha_preds
 
     
-    # ------------------ Unified Optimized Portfolio ------------------
-    st.subheader("Unified Optimized Portfolio")
-    
+    # ------------------ Unified Optimized Portfolio (compute only, store in session) ------------------
+    status.info("Constructing optimized unified portfolio...")
+
     try:
-        # 1. We need final-day stock factor exposures
-        latest_metrics = (
-            metrics.sort_values("date")
-            .groupby("ticker")
-            .last()
-            .reset_index()
-        )
-    
-        tickers_list = latest_metrics["ticker"].tolist()
-    
-        # 2. Build expected returns
-        optimizer = UnifiedPortfolioOptimizer(
-            max_gross=1.0,
-            max_weight=0.05,
-            risk_aversion=1.0,
-        )
-    
-        exp_ret_vec, beta_details = optimizer.build_expected_returns(
-            latest_metrics,
-            forecasts
-        )
-    
-        # 3. Estimate covariance — simplest: use price return covariance
-        price_matrix = (
-            prices.pivot(index="date", columns="ticker", values="returns")
-            .fillna(0.0)
-        )
-        cov = price_matrix.cov().values
-    
-        # 4. Optimize
-        unified_port = optimizer.optimize(
-            expected_returns=exp_ret_vec,
-            cov_matrix=cov,
-            tickers=tickers_list,
-        )
-    
-        st.dataframe(unified_port, use_container_width=True)
-    
+        # Use only tickers for which we have alpha predictions
+        opt_tickers = [tk for tk in tickers if tk in alpha_preds]
+
+        if opt_tickers:
+            optimizer = UnifiedPortfolioOptimizer(
+                risk_aversion=10.0,
+                max_gross=1.5,
+                max_weight=0.10,
+            )
+
+            # 1. Expected returns vector from alpha predictions (in return units, not percent)
+            mu = optimizer.build_expected_returns(
+                alpha_preds=alpha_preds,
+                tickers=opt_tickers,
+            )
+
+            # 2. Covariance matrix from recent price data
+            Sigma = optimizer.build_covariance(
+                price_data=prices,
+                tickers=opt_tickers,
+                lookback_days=252,
+            )
+
+            # 3. Optimize weights
+            weights = optimizer.optimize(mu=mu, Sigma=Sigma)
+
+            # 4. Pretty table for display
+            port_table = optimizer.build_portfolio_table(
+                weights=weights,
+                alpha_preds=alpha_preds,
+            )
+
+            st.session_state["optimized_portfolio"] = port_table
+        else:
+            st.session_state["optimized_portfolio"] = None
+
     except Exception as e:
-        st.error(f"Error constructing optimized portfolio: {e}")
+        st.session_state["optimized_portfolio"] = None
+        st.warning(f"Error constructing optimized portfolio: {e}")
+
 
     # ------------------ Stress Probability ------------------
     status.info("Estimating market stress probability...")
@@ -479,47 +482,26 @@ else:
     # ------------------ Optimized unified portfolio ------------------
     st.subheader("Optimized unified portfolio")
 
-    if alpha_preds and prices is not None:
-        try:
-            optimizer = UnifiedPortfolioOptimizer(
-                lookback_days=252,
-                max_gross=1.5,
-            )
-            opt_result = optimizer.build_portfolio(
-                alpha_preds=alpha_preds,
-                price_data=prices,
-                long_only=True,
-            )
-            if opt_result:
-                weights = opt_result["weights"]
-                exp_alpha_vec = opt_result["expected_alpha"]
+    opt_table = st.session_state.get("optimized_portfolio")
 
-                st.markdown(
-                    "This portfolio combines the per-stock alpha forecasts "
-                    "and recent return covariance to produce a single, "
-                    "Sharpe-style optimized portfolio over the universe."
-                )
+    if isinstance(opt_table, pd.DataFrame) and not opt_table.empty:
+        st.markdown(
+            "This portfolio combines the per-stock alpha forecasts and "
+            "a simple covariance estimate to produce a single, "
+            "Sharpe-style optimized portfolio over the universe."
+        )
+        st.dataframe(
+            opt_table.style.format(
+                {
+                    "weight": "{:.3f}",
+                    "expected_alpha_%": "{:.2f}",
+                }
+            ),
+            use_container_width=True,
+        )
+    else:
+        st.info("Not enough data to construct an optimized portfolio.")
 
-                df_opt = pd.DataFrame(
-                    {
-                        "Weight": weights,
-                        "Expected alpha % (H-day)": exp_alpha_vec * 100.0,
-                    }
-                ).reset_index().rename(columns={"index": "ticker"})
-
-                st.dataframe(
-                    df_opt.style.format(
-                        {
-                            "Weight": "{:.3f}",
-                            "Expected alpha % (H-day)": "{:.2f}",
-                        }
-                    ),
-                    use_container_width=True,
-                )
-            else:
-                st.info("Not enough data to construct an optimized portfolio.")
-        except Exception as e:
-            st.warning(f"Error constructing optimized portfolio: {e}")
 
 
     # =========================================================
