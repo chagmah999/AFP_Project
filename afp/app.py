@@ -266,15 +266,7 @@ if run_btn:
 
     st.session_state["base_alpha"] = alpha_preds
 
-    # ------------------ Stress Probability ------------------
-    status.info("Estimating market stress probability...")
-    stress_model = StressProbabilityModel()
-    _ = stress_model.fit(modeling)
-    stress_fc = stress_model.predict(modeling)
-
-    st.session_state["stress_model_obj"] = stress_model
-    st.session_state["base_stress"] = stress_fc
-
+    
     # ------------------ Unified Optimized Portfolio ------------------
     st.subheader("Unified Optimized Portfolio")
     
@@ -319,6 +311,16 @@ if run_btn:
     
     except Exception as e:
         st.error(f"Error constructing optimized portfolio: {e}")
+
+    # ------------------ Stress Probability ------------------
+    status.info("Estimating market stress probability...")
+    stress_model = StressProbabilityModel()
+    _ = stress_model.fit(modeling)
+    stress_fc = stress_model.predict(modeling)
+
+    st.session_state["stress_model_obj"] = stress_model
+    st.session_state["base_stress"] = stress_fc
+
     
 
     # ------------------ Integrated Recommendations ------------------
