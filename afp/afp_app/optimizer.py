@@ -4,19 +4,18 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from typing import Dict, List
 
 
 class UnifiedPortfolioOptimizer:
     """
-    Simple unified portfolio optimizer that:
-      - takes per-ticker expected alpha and a return covariance matrix
-      - solves a penalized mean-variance style problem in a heuristic way
-      - enforces:
-          * sum of weights = 1
-          * |w_i| <= max_weight
-          * sum(|w_i|) <= max_gross (softly, via rescaling)
+    Unified portfolio optimizer that builds a single long short portfolio
+    from per ticker expected alpha and a covariance estimate.
 
-    This is intentionally lightweight and does NOT rely on cvxpy.
+    It uses a simple mean variance style heuristic:
+      - tilt positions in proportion to alpha / variance
+      - roughly dollar neutral
+      - enforce per name weight cap and gross exposure cap
     """
 
     def __init__(
@@ -29,199 +28,176 @@ class UnifiedPortfolioOptimizer:
         Parameters
         ----------
         risk_aversion : float
-            Lambda on variance in mean-variance objective.
+            Lambda on variance in the heuristic objective.
         max_gross : float
-            Soft cap on total gross exposure sum_i |w_i|.
+            Soft cap on total gross exposure, sum_i |w_i|.
         max_weight : float
-            Hard cap on absolute position per name: |w_i| <= max_weight.
+            Hard cap on |w_i| for any single name.
         """
         self.risk_aversion = risk_aversion
         self.max_gross = max_gross
         self.max_weight = max_weight
 
-        # Backwards-compat alias if other methods used a different name:
+        # Backwards compatible alias in case other code uses this name
         self.max_weight_per_name = max_weight
 
-
-
-    # ---------------------------------------------------------
-    # Build inputs: expected alpha vector and covariance matrix
-    # ---------------------------------------------------------
-    def build_inputs(
+    # ----------------------------------------------------------
+    # 1. Expected returns from alpha predictions
+    # ----------------------------------------------------------
+    def build_expected_returns(
         self,
-        alpha_preds: dict,
-        price_data: pd.DataFrame,
-    ) -> tuple[pd.Series, pd.DataFrame | None]:
-        """
-        From:
-          alpha_preds: dict[ticker -> alpha_pred_dict]
-              where alpha_pred_dict["expected_alpha"] is the H day excess alpha
-
-          price_data: daily price DataFrame with columns:
-              ["date", "ticker", "returns", "adjClose", ...]
-
-        Returns:
-          exp_alpha: pd.Series indexed by ticker with expected alpha
-          cov: pd.DataFrame covariance matrix of daily returns
-        """
-        if not alpha_preds:
-            return pd.Series(dtype=float), None
-
-        # Build expected alpha vector
-        exp_alpha = pd.Series(
-            {
-                tk: v.get("expected_alpha", np.nan)
-                for tk, v in alpha_preds.items()
-            },
-            dtype=float,
-        )
-        exp_alpha = exp_alpha.replace([np.inf, -np.inf], np.nan).dropna()
-        if exp_alpha.empty:
-            return exp_alpha, None
-
-        tickers = exp_alpha.index.tolist()
-
-        if price_data is None or price_data.empty:
-            return exp_alpha, None
-
-        px = price_data[price_data["ticker"].isin(tickers)].copy()
-        if px.empty:
-            return exp_alpha, None
-
-        # Restrict to recent window for covariance estimation
-        px = px.sort_values("date")
-        if "date" in px.columns:
-            last_date = px["date"].max()
-            cutoff = last_date - pd.Timedelta(days=self.lookback_days)
-            px = px[px["date"] >= cutoff]
-
-        # Pivot to date x ticker returns matrix
-        ret_pivot = px.pivot_table(
-            index="date",
-            columns="ticker",
-            values="returns",
-        )
-
-        # Drop dates that are all NaN
-        ret_pivot = ret_pivot.dropna(how="all")
-        if ret_pivot.empty:
-            return exp_alpha, None
-
-        cov = ret_pivot.cov()
-
-        # Align rows/cols to alpha tickers
-        cov = cov.reindex(index=tickers, columns=tickers)
-
-        return exp_alpha, cov
-
-    # ---------------------------------------------------------
-    # Core optimizer: Markowitz tangency style
-    # ---------------------------------------------------------
-    def optimize(
-        self,
-        exp_alpha: pd.Series,
-        cov: pd.DataFrame | None,
-        long_only: bool | None = None,
+        alpha_preds: Dict[str, dict],
+        tickers: List[str],
     ) -> pd.Series:
         """
-        Compute portfolio weights.
+        Build a vector of expected returns mu from the per ticker alpha predictions.
 
-        If covariance is unavailable or singular, falls back to equal weight.
-
-        Constraints:
-          - Sum of weights = 1 if long_only is True
-          - If long_only True: w_i >= 0
-          - If long_only False: scale so sum(|w_i|) <= max_gross
+        alpha_preds[ticker]["expected_alpha"] is assumed to be in return units,
+        not percent.
         """
-        if long_only is None:
-            long_only = self.long_only
+        vals = []
+        for tk in tickers:
+            info = alpha_preds.get(tk, {})
+            vals.append(float(info.get("expected_alpha", 0.0)))
+        mu = pd.Series(vals, index=tickers, name="mu")
+        return mu
 
-        tickers = exp_alpha.index.tolist()
-        n = len(tickers)
-
-        if cov is None or cov.empty:
-            # Fallback: equal weight
-            return pd.Series(
-                np.ones(n) / n,
-                index=tickers,
-                name="weight",
-            )
-
-        # Replace NaNs with zero to avoid numerical issues
-        cov = cov.fillna(0.0)
-
-        mu = exp_alpha.values
-        try:
-            inv_cov = np.linalg.pinv(cov.values)
-        except Exception:
-            # Fallback if inversion fails
-            return pd.Series(
-                np.ones(n) / n,
-                index=tickers,
-                name="weight",
-            )
-
-        # Unconstrained tangency weights (up to scale)
-        raw_w = inv_cov @ mu
-
-        if long_only:
-            raw_w = np.maximum(raw_w, 0.0)
-
-        # If everything got clamped to zero or is non-finite, fall back
-        if not np.any(np.isfinite(raw_w)) or np.all(raw_w == 0):
-            return pd.Series(
-                np.ones(n) / n,
-                index=tickers,
-                name="weight",
-            )
-
-        if long_only:
-            # Normalize to sum to 1
-            w = raw_w / np.sum(raw_w)
-        else:
-            # Allow long/short but cap gross exposure
-            gross = np.sum(np.abs(raw_w))
-            if gross > 0:
-                w = raw_w / gross
-            else:
-                w = raw_w
-
-            if self.max_gross is not None and self.max_gross > 0:
-                gross = np.sum(np.abs(w))
-                if gross > self.max_gross:
-                    w = w * (self.max_gross / gross)
-
-        return pd.Series(w, index=tickers, name="weight")
-
-    # ---------------------------------------------------------
-    # High level helper: from alpha_preds + price_data
-    # ---------------------------------------------------------
-    def build_portfolio(
+    # ----------------------------------------------------------
+    # 2. Covariance matrix from price data
+    # ----------------------------------------------------------
+    def build_covariance(
         self,
-        alpha_preds: dict,
         price_data: pd.DataFrame,
-        long_only: bool | None = None,
-    ) -> dict | None:
+        tickers: List[str],
+        lookback_days: int = 252,
+    ) -> pd.DataFrame:
         """
-        Convenience wrapper:
+        Build a return covariance matrix Sigma for the given tickers using
+        recent daily returns.
 
-        1) Build expected alpha vector and covariance
-        2) Optimize to get weights
-        3) Return a dict with weights and expected alpha per ticker
-
-        Returns None if inputs are empty.
+        Uses log_returns if available, else returns.
         """
-        exp_alpha, cov = self.build_inputs(alpha_preds, price_data)
-        if exp_alpha.empty:
-            return None
+        if price_data is None or price_data.empty:
+            return pd.DataFrame()
 
-        weights = self.optimize(exp_alpha, cov, long_only=long_only)
+        df = price_data[price_data["ticker"].isin(tickers)].copy()
+        if df.empty:
+            return pd.DataFrame()
 
-        # Align expected alpha to the same index as weights
-        exp_alpha_aligned = exp_alpha.reindex(weights.index)
+        df = df.sort_values("date")
 
-        return {
-            "weights": weights.sort_values(ascending=False),
-            "expected_alpha": exp_alpha_aligned,
-        }
+        ret_col = "log_returns" if "log_returns" in df.columns else "returns"
 
+        # Restrict to last lookback_days by date
+        unique_dates = df["date"].drop_duplicates().sort_values()
+        if len(unique_dates) > lookback_days:
+            cutoff = unique_dates.iloc[-lookback_days]
+            df = df[df["date"] >= cutoff]
+
+        pivot = df.pivot_table(index="date", columns="ticker", values=ret_col)
+        pivot = pivot.dropna(how="all")
+        if pivot.shape[0] < 2:
+            return pd.DataFrame()
+
+        Sigma = pivot.cov()
+
+        # Ensure all tickers appear in index/columns in a fixed order
+        Sigma = Sigma.reindex(index=tickers, columns=tickers)
+
+        # Fill diagonal if missing with sample variance, others with zero
+        for tk in Sigma.index:
+            if np.isnan(Sigma.loc[tk, tk]):
+                if tk in pivot.columns:
+                    Sigma.loc[tk, tk] = pivot[tk].var()
+                else:
+                    Sigma.loc[tk, tk] = 0.0
+
+        Sigma = Sigma.fillna(0.0)
+        return Sigma
+
+    # ----------------------------------------------------------
+    # 3. Heuristic mean variance optimization
+    # ----------------------------------------------------------
+    def optimize(self, mu: pd.Series, Sigma: pd.DataFrame) -> pd.Series:
+        """
+        Produce a vector of weights w given expected returns mu and covariance Sigma.
+
+        Heuristic:
+          - Start with w_raw proportional to mu / (lambda * variance)
+          - Center weights to be roughly dollar neutral
+          - Clip to per name bound |w_i| <= max_weight
+          - Scale to respect gross exposure cap
+          - Finally renormalize net exposure to sum to 1 (if possible)
+        """
+        if mu is None or mu.empty:
+            return pd.Series(dtype=float)
+
+        tickers = list(mu.index)
+        n = len(tickers)
+        if n == 0:
+            return pd.Series(dtype=float)
+
+        if Sigma is None or Sigma.empty:
+            # Fallback: only alpha, no risk. Use simple centered weights.
+            raw = mu.values.astype(float)
+            raw = raw - raw.mean()
+        else:
+            diag = np.diag(Sigma.values)
+            diag = np.where(diag <= 0, 1e-6, diag)
+            raw = mu.values / (self.risk_aversion * diag)
+
+            # Center to roughly dollar neutral
+            raw = raw - raw.mean()
+
+        # Clip per name
+        raw = np.clip(raw, -self.max_weight, self.max_weight)
+
+        # If all zero, fallback to equal weight
+        if np.allclose(raw, 0.0):
+            w_equal = np.repeat(1.0 / n, n)
+            return pd.Series(w_equal, index=tickers, name="weight")
+
+        # Enforce gross exposure cap
+        gross = np.sum(np.abs(raw))
+        if gross > 0:
+            scale = min(self.max_gross / gross, 1.0)
+            raw = raw * scale
+
+        # Renormalize net exposure to sum to 1 if not tiny
+        net = raw.sum()
+        if np.abs(net) > 1e-6:
+            raw = raw / net
+
+        w = pd.Series(raw, index=tickers, name="weight")
+        return w
+
+    # ----------------------------------------------------------
+    # 4. Pretty table for display
+    # ----------------------------------------------------------
+    def build_portfolio_table(
+        self,
+        weights: pd.Series,
+        alpha_preds: Dict[str, dict],
+    ) -> pd.DataFrame:
+        """
+        Turn weights and alpha predictions into a nice display table.
+        """
+        if weights is None or weights.empty:
+            return pd.DataFrame()
+
+        rows = []
+        for tk, w in weights.items():
+            info = alpha_preds.get(tk, {})
+            exp_alpha = float(info.get("expected_alpha", 0.0)) * 100.0
+            rows.append(
+                {
+                    "ticker": tk,
+                    "weight": w,
+                    "side": "Long" if w > 0 else ("Short" if w < 0 else "Flat"),
+                    "expected_alpha_%": exp_alpha,
+                }
+            )
+
+        df = pd.DataFrame(rows)
+        df = df.sort_values("weight", ascending=False).reset_index(drop=True)
+        return df
