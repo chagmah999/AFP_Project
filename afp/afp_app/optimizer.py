@@ -8,20 +8,40 @@ import pandas as pd
 
 class UnifiedPortfolioOptimizer:
     """
-    Build a unified optimized portfolio over the stock universe using
-    the per ticker alpha forecasts and historical covariance.
+    Simple unified portfolio optimizer that:
+      - takes per-ticker expected alpha and a return covariance matrix
+      - solves a penalized mean-variance style problem in a heuristic way
+      - enforces:
+          * sum of weights = 1
+          * |w_i| <= max_weight
+          * sum(|w_i|) <= max_gross (softly, via rescaling)
 
-    This version intentionally avoids cvxpy and uses a simple
-    Markowitz style maximum Sharpe solution with basic constraints.
-
-    High level:
-      1) Construct expected alpha vector μ from alpha_preds
-      2) Estimate covariance matrix Σ from recent daily returns
-      3) Compute tangency style weights w ∝ Σ^{-1} μ
-      4) Apply simple constraints:
-           - long_only: clamp to w_i >= 0, normalize to sum to 1
-           - if not long_only: scale so that sum(|w_i|) <= max_gross
+    This is intentionally lightweight and does NOT rely on cvxpy.
     """
+
+    def __init__(
+        self,
+        risk_aversion: float = 10.0,
+        max_gross: float = 1.5,
+        max_weight: float = 0.10,
+    ):
+        """
+        Parameters
+        ----------
+        risk_aversion : float
+            Lambda on variance in mean-variance objective.
+        max_gross : float
+            Soft cap on total gross exposure sum_i |w_i|.
+        max_weight : float
+            Hard cap on absolute position per name: |w_i| <= max_weight.
+        """
+        self.risk_aversion = risk_aversion
+        self.max_gross = max_gross
+        self.max_weight = max_weight
+
+        # Backwards-compat alias if other methods used a different name:
+        self.max_weight_per_name = max_weight
+
 
     def __init__(
         self,
