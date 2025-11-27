@@ -23,121 +23,6 @@ from afp_app.signal_stress import StressProbabilityModel
 from afp_app.engine import MarketMancerEngine
 from afp_app.scenario import scenario_factor_premia, scenario_stress
 
-def build_sharpe_weighted_factor_portfolios(
-    metrics: pd.DataFrame,
-    forecasts: dict,
-    vol_col: str = "volatility_60d",
-) -> dict[str, pd.DataFrame]:
-    """
-    Build recommended factor portfolios that tilt weights toward stocks with
-    strong factor exposures and lower volatility, using a Sharpe-like signal.
-
-    For each factor f in {VALUE, QUALITY, MOMENTUM, LOW_VOL}:
-
-      1. Take the latest factor score per ticker (0–1, already sector/industry neutral).
-      2. Center the score around zero: exposure_i = score_i - 0.5
-      3. Use the AR style factor premium forecast mu_f as the expected payoff
-         for one unit of exposure.
-      4. Compute a stock level factor expected return: er_i = exposure_i * mu_f
-      5. Divide by realized volatility to get a Sharpe-like signal:
-         s_i = er_i / sigma_i
-      6. Stocks with positive s_i go in the long leg, negatives go in the short leg.
-         Long weights are proportional to s_i and sum to +1.
-         Short weights are proportional to |s_i| and sum to -1.
-
-    Returns a dict mapping factor name -> DataFrame with columns:
-      ticker, position ("long"/"short"), weight, sharpe_signal.
-    """
-    ports: dict[str, pd.DataFrame] = {}
-
-    if metrics is None or metrics.empty or not forecasts:
-        return ports
-
-    # Latest metrics per ticker
-    latest = (
-        metrics.sort_values("date")
-        .groupby("ticker")
-        .last()
-        .reset_index()
-    )
-
-    factor_score_cols = {
-        "VALUE": "value_score",
-        "QUALITY": "quality_score",
-        "MOMENTUM": "momentum_score",
-        "LOW_VOL": "lowvol_score",
-    }
-
-    for fname, score_col in factor_score_cols.items():
-        if fname not in forecasts:
-            continue
-        if score_col not in latest.columns:
-            continue
-
-        mu = forecasts[fname].get("ensemble_forecast", None)
-        if mu is None or np.isnan(mu):
-            continue
-
-        df = latest[["ticker", score_col]].copy()
-        if vol_col in latest.columns:
-            df["vol"] = latest[vol_col]
-        else:
-            df["vol"] = np.nan
-
-        df = df.dropna(subset=[score_col, "vol"])
-        if df.empty:
-            continue
-
-        # Step 1: center score around zero
-        df["exposure"] = df[score_col] - 0.5
-
-        # Step 2: factor expected contribution
-        df["er_factor"] = df["exposure"] * mu
-
-        # Step 3: Sharpe-like signal
-        df["sharpe_signal"] = df["er_factor"] / df["vol"]
-        df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=["sharpe_signal"])
-        if df.empty:
-            continue
-
-        pos = df[df["sharpe_signal"] > 0].copy()
-        neg = df[df["sharpe_signal"] < 0].copy()
-
-        if pos.empty and neg.empty:
-            continue
-
-        legs = []
-
-        # Long leg: scale positive Sharpe signals to sum to +1
-        if not pos.empty:
-            sum_pos = pos["sharpe_signal"].sum()
-            if sum_pos != 0:
-                pos["weight"] = pos["sharpe_signal"] / sum_pos
-                pos["position"] = "long"
-                legs.append(pos[["ticker", "position", "weight", "sharpe_signal"]])
-
-        # Short leg: scale absolute value of negative Sharpe signals to sum to -1
-        if not neg.empty:
-            abs_neg = neg["sharpe_signal"].abs()
-            sum_neg = abs_neg.sum()
-            if sum_neg != 0:
-                neg["weight"] = -abs_neg / sum_neg
-                neg["position"] = "short"
-                legs.append(neg[["ticker", "position", "weight", "sharpe_signal"]])
-
-        if not legs:
-            continue
-
-        port_df = (
-            pd.concat(legs, ignore_index=True)
-            .sort_values("weight", ascending=False)
-            .reset_index(drop=True)
-        )
-        ports[fname] = port_df
-
-    return ports
-
-
 st.set_page_config(page_title="AFP Forecasting Tool", layout="wide")
 
 st.title("AFP Forecasting Tool")
@@ -315,10 +200,6 @@ if run_btn:
         st.session_state["factor_portfolio_sizes"] = port_sizes
         st.session_state["sample_factor_scores"] = sample
 
-    # Keep metrics for later use (e.g., portfolio construction)
-    st.session_state["factor_metrics"] = metrics
-
-
 
     # ------------------ Macro Data & Modeling Frame ------------------
     status.info("Fetching macro data...")
@@ -359,11 +240,6 @@ if run_btn:
 
     st.session_state["base_forecasts"] = forecasts
     st.session_state["base_factor_eval"] = factor_eval
-
-    # ------------------ Recommended factor portfolios (Sharpe-style) ------------------
-    recommended_ports = build_sharpe_weighted_factor_portfolios(metrics, forecasts)
-    st.session_state["recommended_factor_ports"] = recommended_ports
-
 
     # ------------------ Alpha Predictions ------------------
     status.info("Predicting per-ticker alpha...")
@@ -417,8 +293,6 @@ modeling = st.session_state.get("modeling_frame")
 forecaster = st.session_state.get("forecaster_obj")
 stress = st.session_state.get("stress_model_obj")
 recs = st.session_state.get("base_recs")
-recommended_factor_ports = st.session_state.get("recommended_factor_ports")
-
 
 if not forecasts and not alpha_preds and not stress_fc:
     st.info("Run the pipeline from the sidebar to generate forecasts.")
@@ -525,48 +399,6 @@ else:
                 )
     else:
         st.info("No factor forecasts available.")
-
-    # ------------------ Recommended factor portfolios ------------------
-    st.subheader("Recommended factor portfolios (Sharpe-style)")
-
-    if recommended_factor_ports and forecasts:
-        st.caption(
-            "For each factor, we form a zero cost long short portfolio that "
-            "tilts more heavily toward stocks with strong factor exposures and lower volatility. "
-            "Weights are proportional to a Sharpe like signal: "
-            "expected factor contribution divided by realized volatility."
-        )
-
-        for fname, port in recommended_factor_ports.items():
-            if port is None or port.empty or fname not in forecasts:
-                continue
-
-            fc = forecasts[fname]
-            exp_prem = fc.get("ensemble_forecast", 0.0)
-
-            with st.expander(f"{fname} recommended portfolio"):
-                st.markdown(
-                    f"**Expected {fname} premium (AR style forecast)**: "
-                    f"{exp_prem * 100.0:.2f}%"
-                )
-
-                st.markdown(
-                    "Weights are constructed as follows: "
-                    "we center the factor score around zero to get an exposure, "
-                    "multiply by the expected factor premium to get a stock level factor return, "
-                    "then divide by the stock's volatility to get a Sharpe style signal. "
-                    "Positive signals go into the long leg and negative signals into the short leg, "
-                    "and we normalize so that long weights sum to +1 and short weights sum to -1."
-                )
-
-                view = port[["ticker", "position", "weight", "sharpe_signal"]].copy()
-                st.dataframe(
-                    view.sort_values("weight", ascending=False),
-                    use_container_width=True,
-                )
-    else:
-        st.info("No recommended factor portfolios available. Run the pipeline first.")
-
 
     # =========================================================
     # 1.b Universe and factor score details (after premia)
