@@ -11,7 +11,6 @@ def _safe_div(num, den):
     out[~np.isfinite(out)] = np.nan
     return out
 
-
 def calculate_factor_metrics(
     fundamentals: dict,
     price_data: pd.DataFrame
@@ -22,7 +21,8 @@ def calculate_factor_metrics(
 
     - Uses FMP fundamentals (balance sheet, income statement, cash flow)
     - Carries through 'sector' / 'industry' if present
-    - Computes raw ratios
+    - Uses outstandingShares from /profile (merged into fundamentals)
+    - Computes B/P, E/P, FCF/P using market cap = price * shares_out
     - Computes 60d momentum and 60d realized volatility
     - Normalizes within sector (or industry) using percentile ranks
     """
@@ -34,7 +34,7 @@ def calculate_factor_metrics(
         return pd.DataFrame()
 
     # ---------------- Merge fundamentals ----------------
-        # Columns to keep from balance sheet, including optional sector metadata if present
+    # Columns to keep from balance sheet, including optional sector metadata if present
     bs_cols = [
         "ticker", "date",
         "totalStockholdersEquity",
@@ -42,8 +42,8 @@ def calculate_factor_metrics(
         "totalLiabilities",
         "totalDebt",
         "cashAndCashEquivalents",
-        # common share count if available
-        "commonStockSharesOutstanding",
+        # outstandingShares will be present here if merged from /profile
+        "outstandingShares",
     ]
     for meta_col in ["sector", "industry"]:
         if meta_col in bs.columns:
@@ -66,7 +66,6 @@ def calculate_factor_metrics(
     ]
     inc_use = inc[inc_cols].copy()
 
-
     metrics = pd.merge(
         bs_use,
         inc_use,
@@ -74,9 +73,11 @@ def calculate_factor_metrics(
         how="inner",
     )
 
-    # Unified shares outstanding (try several possible columns)
+    # Unified shares outstanding:
+    # 1) prefer outstandingShares from /profile
+    # 2) fall back to weightedAverageShsOut / weightedAverageShsOutDil
     share_candidates = [
-        "commonStockSharesOutstanding",
+        "outstandingShares",
         "weightedAverageShsOut",
         "weightedAverageShsOutDil",
     ]
@@ -87,7 +88,7 @@ def calculate_factor_metrics(
                 pd.to_numeric(metrics[col], errors="coerce")
             )
 
-
+    # Optional cash flow
     if not cf.empty:
         cf_cols = ["ticker", "date", "freeCashFlow", "operatingCashFlow"]
         cf_use = cf[cf_cols].copy()
@@ -120,7 +121,7 @@ def calculate_factor_metrics(
         1.0,
     )
 
-    # Value building blocks: B/P, E/P, FCF/P (implemented as B/M, E/M, FCF/M)
+    # Value building blocks: B/P, E/P, FCF/P (implemented as B/M, E/M, F/M)
     metrics["bp_ratio"] = _safe_div(
         metrics["book_equity"],
         metrics["market_cap"],
@@ -134,7 +135,7 @@ def calculate_factor_metrics(
         metrics["market_cap"],
     )
 
-    # Profitability / quality style ratios (unchanged logic)
+    # Profitability / quality style ratios
     metrics["roe"] = _safe_div(
         metrics["netIncome"],
         metrics["totalStockholdersEquity"],
@@ -155,7 +156,6 @@ def calculate_factor_metrics(
         metrics["totalDebt"],
         metrics["totalStockholdersEquity"],
     )
-
 
     # ---------------- Momentum and volatility from price data ----------------
     if price_data.empty:
@@ -245,13 +245,17 @@ def calculate_factor_metrics(
     if value_components:
         metrics["value_raw"] = metrics[value_components].mean(axis=1, skipna=True)
 
-        # Map raw value signal to 0–1 percentile within industry/date
+        # Map raw value signal to 0–1 percentile within industry/sector
         # Higher value_raw (cheaper stocks) should get higher score
-        metrics["value_score"] = (
-            metrics.groupby(group_cols)["value_raw"]
-            .transform(lambda s: s.rank(method="average", pct=True, ascending=False))
-        )
-
+        if group_cols:
+            metrics["value_score"] = (
+                metrics.groupby(group_cols)["value_raw"]
+                .transform(lambda s: s.rank(method="average", pct=True, ascending=False))
+            )
+        else:
+            metrics["value_score"] = _rank_pct(
+                metrics["value_raw"], ascending=False
+            )
 
     # QUALITY: average of ROE, ROA, margins, inverse leverage
     quality_components = []
