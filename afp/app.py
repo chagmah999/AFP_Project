@@ -451,6 +451,31 @@ else:
         st.info("No factor forecasts available.")
       
 
+    
+
+    # =========================================================
+    # 1.b Universe and factor score details (after premia)
+    # =========================================================
+    with st.expander("Show universe and stock-level factor scores (details)"):
+        uni = st.session_state.get("universe_tickers")
+        port_sizes = st.session_state.get("factor_portfolio_sizes")
+        sample_scores = st.session_state.get("sample_factor_scores")
+
+        if uni:
+            st.markdown(f"**Universe size**: {len(uni)}")
+            st.dataframe(
+                pd.DataFrame({"ticker": uni}),
+                use_container_width=True,
+            )
+
+        if port_sizes:
+            st.markdown("**Factor portfolios (size of long plus short)**")
+            st.json(port_sizes)
+
+        if isinstance(sample_scores, pd.DataFrame) and not sample_scores.empty:
+            st.markdown("**Sample stock-level factor scores (0 to 1)**")
+            st.dataframe(sample_scores, use_container_width=True)
+
     # ------------------ Optimized unified portfolio ------------------
     st.subheader("Optimized unified portfolio")
 
@@ -495,29 +520,6 @@ else:
                 st.info("Not enough data to construct an optimized portfolio.")
         except Exception as e:
             st.warning(f"Error constructing optimized portfolio: {e}")
-
-    # =========================================================
-    # 1.b Universe and factor score details (after premia)
-    # =========================================================
-    with st.expander("Show universe and stock-level factor scores (details)"):
-        uni = st.session_state.get("universe_tickers")
-        port_sizes = st.session_state.get("factor_portfolio_sizes")
-        sample_scores = st.session_state.get("sample_factor_scores")
-
-        if uni:
-            st.markdown(f"**Universe size**: {len(uni)}")
-            st.dataframe(
-                pd.DataFrame({"ticker": uni}),
-                use_container_width=True,
-            )
-
-        if port_sizes:
-            st.markdown("**Factor portfolios (size of long plus short)**")
-            st.json(port_sizes)
-
-        if isinstance(sample_scores, pd.DataFrame) and not sample_scores.empty:
-            st.markdown("**Sample stock-level factor scores (0 to 1)**")
-            st.dataframe(sample_scores, use_container_width=True)
 
 
     # =========================================================
