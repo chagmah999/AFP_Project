@@ -2,7 +2,22 @@
 
 import numpy as np
 import pandas as pd
+# --- Ensure cvxpy is installed ---
+import importlib
+import subprocess
+import sys
+
+def ensure_cvxpy():
+    if importlib.util.find_spec("cvxpy") is None:
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "cvxpy"])
+        except Exception as e:
+            raise RuntimeError(f"Could not install cvxpy: {e}")
+
+ensure_cvxpy()
+
 import cvxpy as cp
+
 
 class UnifiedPortfolioOptimizer:
     """
