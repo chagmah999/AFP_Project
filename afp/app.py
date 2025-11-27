@@ -447,6 +447,52 @@ else:
                 )
     else:
         st.info("No factor forecasts available.")
+      
+
+    # ------------------ Optimized unified portfolio ------------------
+    st.subheader("Optimized unified portfolio")
+
+    if alpha_preds and prices is not None:
+        try:
+            optimizer = UnifiedPortfolioOptimizer(
+                lookback_days=252,
+                max_gross=1.5,
+            )
+            opt_result = optimizer.build_portfolio(
+                alpha_preds=alpha_preds,
+                price_data=prices,
+                long_only=True,
+            )
+            if opt_result:
+                weights = opt_result["weights"]
+                exp_alpha_vec = opt_result["expected_alpha"]
+
+                st.markdown(
+                    "This portfolio combines the per-stock alpha forecasts "
+                    "and recent return covariance to produce a single, "
+                    "Sharpe-style optimized portfolio over the universe."
+                )
+
+                df_opt = pd.DataFrame(
+                    {
+                        "Weight": weights,
+                        "Expected alpha % (H-day)": exp_alpha_vec * 100.0,
+                    }
+                ).reset_index().rename(columns={"index": "ticker"})
+
+                st.dataframe(
+                    df_opt.style.format(
+                        {
+                            "Weight": "{:.3f}",
+                            "Expected alpha % (H-day)": "{:.2f}",
+                        }
+                    ),
+                    use_container_width=True,
+                )
+            else:
+                st.info("Not enough data to construct an optimized portfolio.")
+        except Exception as e:
+            st.warning(f"Error constructing optimized portfolio: {e}")
 
     # =========================================================
     # 1.b Universe and factor score details (after premia)
