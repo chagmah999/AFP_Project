@@ -43,26 +43,6 @@ class UnifiedPortfolioOptimizer:
         self.max_weight_per_name = max_weight
 
 
-    def __init__(
-        self,
-        lookback_days: int = 252,
-        max_gross: float = 1.0,
-        long_only: bool = True,
-    ):
-        """
-        Parameters
-        ----------
-        lookback_days : int
-            Number of calendar days of history to use for covariance.
-        max_gross : float
-            Maximum gross exposure (sum of absolute weights) if allowing
-            long/short. For a long-only portfolio this is effectively 1.
-        long_only : bool
-            If True, enforce w_i >= 0 and sum(w) = 1.
-        """
-        self.lookback_days = lookback_days
-        self.max_gross = max_gross
-        self.long_only = long_only
 
     # ---------------------------------------------------------
     # Build inputs: expected alpha vector and covariance matrix
