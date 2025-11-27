@@ -22,6 +22,8 @@ from afp_app.signal_alpha import AlphaPredictor
 from afp_app.signal_stress import StressProbabilityModel
 from afp_app.engine import MarketMancerEngine
 from afp_app.scenario import scenario_factor_premia, scenario_stress
+from afp_app.optimizer import UnifiedPortfolioOptimizer
+
 
 st.set_page_config(page_title="AFP Forecasting Tool", layout="wide")
 
@@ -272,6 +274,52 @@ if run_btn:
 
     st.session_state["stress_model_obj"] = stress_model
     st.session_state["base_stress"] = stress_fc
+
+    # ------------------ Unified Optimized Portfolio ------------------
+    st.subheader("Unified Optimized Portfolio")
+    
+    try:
+        # 1. We need final-day stock factor exposures
+        latest_metrics = (
+            metrics.sort_values("date")
+            .groupby("ticker")
+            .last()
+            .reset_index()
+        )
+    
+        tickers_list = latest_metrics["ticker"].tolist()
+    
+        # 2. Build expected returns
+        optimizer = UnifiedPortfolioOptimizer(
+            max_gross=1.0,
+            max_weight=0.05,
+            risk_aversion=1.0,
+        )
+    
+        exp_ret_vec, beta_details = optimizer.build_expected_returns(
+            latest_metrics,
+            forecasts
+        )
+    
+        # 3. Estimate covariance — simplest: use price return covariance
+        price_matrix = (
+            prices.pivot(index="date", columns="ticker", values="returns")
+            .fillna(0.0)
+        )
+        cov = price_matrix.cov().values
+    
+        # 4. Optimize
+        unified_port = optimizer.optimize(
+            expected_returns=exp_ret_vec,
+            cov_matrix=cov,
+            tickers=tickers_list,
+        )
+    
+        st.dataframe(unified_port, use_container_width=True)
+    
+    except Exception as e:
+        st.error(f"Error constructing optimized portfolio: {e}")
+    
 
     # ------------------ Integrated Recommendations ------------------
     status.info("Integrating recommendations...")
