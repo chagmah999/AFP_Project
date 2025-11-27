@@ -157,11 +157,15 @@ if run_btn:
     else:
         ctor = FactorPortfolioConstructor(metrics, prices)
         portfolios = ctor.construct_all()
-
+        # Store portfolios for later display 
+        st.session_state["factor_portfolios"] = portfolios
+        # Quick size summary for debugging / sanity check (can keep or remove)
         port_sizes = {
             k: (0 if v is None or v.empty else len(v))
             for k, v in portfolios.items()
         }
+        
+        st.json(port_sizes)
 
         factor_returns = ctor.calculate_factor_returns(
             start_date,
@@ -293,6 +297,8 @@ modeling = st.session_state.get("modeling_frame")
 forecaster = st.session_state.get("forecaster_obj")
 stress = st.session_state.get("stress_model_obj")
 recs = st.session_state.get("base_recs")
+factor_ports = st.session_state.get("factor_portfolios")
+
 
 if not forecasts and not alpha_preds and not stress_fc:
     st.info("Run the pipeline from the sidebar to generate forecasts.")
@@ -399,6 +405,63 @@ else:
                 )
     else:
         st.info("No factor forecasts available.")
+
+    # ------------------ Factor portfolios and ticker-level construction ------------------
+    st.subheader("Factor portfolios and ticker recommendations")
+
+    if factor_ports and forecasts:
+        desc = (
+            "For each factor, we construct an equal-weight long-short portfolio. "
+            "The long leg holds the highest factor scores, the short leg holds the lowest. "
+            "Weights within each leg are equal and sum to +1 on the long side and -1 on the short side."
+        )
+        st.caption(desc)
+
+        for fname, port in factor_ports.items():
+            if port is None or port.empty or fname not in forecasts:
+                continue
+
+            fc = forecasts[fname]
+            exp_prem = fc.get("ensemble_forecast", 0.0)
+
+            # Decide which leg is the "recommended" exposure given the sign of the forecast
+            if exp_prem >= 0:
+                rec_leg = "long"
+                rec_label = "Recommended overweight tickers (positive expected premium)"
+            else:
+                rec_leg = "short"
+                rec_label = "Recommended underweight/short tickers (negative expected premium)"
+
+            with st.expander(f"{fname} factor portfolio"):
+                st.markdown(
+                    f"**Expected {fname} premium (AR(1) ensemble)**: "
+                    f"{exp_prem * 100.0:.2f}%"
+                )
+
+                # Full portfolio table (both long and short)
+                st.markdown("**Full long-short portfolio construction**")
+                port_view = port[["ticker", "position", "weight"]].copy()
+                st.dataframe(
+                    port_view.sort_values(["position", "ticker"]),
+                    use_container_width=True,
+                )
+
+                # Recommended leg
+                st.markdown(f"**{rec_label}**")
+                rec_view = port_view[port_view["position"] == rec_leg].copy()
+                if not rec_view.empty:
+                    st.dataframe(
+                        rec_view.sort_values("weight", ascending=False),
+                        use_container_width=True,
+                    )
+                else:
+                    st.write("No tickers in this leg for the current universe.")
+    else:
+        st.info(
+            "No factor portfolios available yet. "
+            "Run the pipeline to construct factor portfolios and recommendations."
+        )
+
 
     # =========================================================
     # 1.b Universe and factor score details (after premia)
