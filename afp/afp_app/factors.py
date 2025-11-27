@@ -35,6 +35,8 @@ def calculate_factor_metrics(
 
     # ---------------- Merge fundamentals ----------------
     # Columns to keep from balance sheet, including optional sector metadata if present
+    # ---------------- Merge fundamentals ----------------
+    # Columns to keep from balance sheet, including optional sector metadata if present
     bs_cols = [
         "ticker", "date",
         "totalStockholdersEquity",
@@ -42,14 +44,19 @@ def calculate_factor_metrics(
         "totalLiabilities",
         "totalDebt",
         "cashAndCashEquivalents",
-        # outstandingShares will be present here if merged from /profile
-        "outstandingShares",
     ]
+
+    # Add shares column only if it actually exists (e.g. merged from profile)
+    if "outstandingShares" in bs.columns:
+        bs_cols.append("outstandingShares")
+
+    # Carry through sector / industry if present
     for meta_col in ["sector", "industry"]:
         if meta_col in bs.columns:
             bs_cols.append(meta_col)
 
     bs_use = bs[bs_cols].copy()
+
 
     # Income statement
     inc_cols = [
