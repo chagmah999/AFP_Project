@@ -574,6 +574,14 @@ else:
     # 2. Alpha predictions
     # =========================================================
     st.subheader("Alpha predictions (top 10)")
+    st.caption(
+        "This section lists the 10 stocks with the highest expected *H*-day alpha from a Lasso regression that links "
+        "standardized stock characteristics (valuation, quality, momentum, size, etc.) to their future *H*-day returns. "
+        "For each name, the expected alpha is the model’s forecast of its *H*-day excess return (in percent) based on "
+        "those historical relationships, and the fundamental score summarizes how attractive its fundamentals look on those "
+        "same dimensions."
+    )
+
 
     if alpha_preds:
         df_alpha = pd.DataFrame(
