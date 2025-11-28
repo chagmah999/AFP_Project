@@ -344,14 +344,19 @@ else:
         # Summary table (ensemble forecast, expressed in percent)
         summary_rows = []
         drivers_rows = []
-
+        
         for f, v in forecasts.items():
+            # Prefer AR(1) forecast; if for some reason it is missing,
+            # fall back to the ensemble so the app does not crash.
+            ar1_fc = v.get("ar1_forecast", v.get("ensemble_forecast"))
+        
             summary_rows.append(
                 {
                     "Factor": f,
-                    "Expected Premium % (ensemble)": v["ensemble_forecast"] * 100.0,
+                    "Expected Premium % (AR(1))": ar1_fc * 100.0,
                 }
             )
+        
             for d in (v.get("top_drivers") or []):
                 drivers_rows.append(
                     {
@@ -360,6 +365,7 @@ else:
                         "RF Importance": d.get("rf_importance"),
                     }
                 )
+
 
         df_summary = pd.DataFrame(summary_rows).sort_values(
             "Expected Premium % (ensemble)", ascending=False
