@@ -35,7 +35,6 @@ for key, default in [
     ("base_forecasts", None),
     ("base_factor_eval", None),
     ("base_alpha", None),
-    ("base_recs", None),
     ("modeling_frame", None),
     ("forecaster_obj", None),
     # store universe and factor score info for later display
@@ -47,6 +46,7 @@ for key, default in [
     # store the forecast horizon used when pipeline was last run
     ("portfolio_horizon", None),
 ]:
+
     if key not in st.session_state:
         st.session_state[key] = default
 
@@ -320,19 +320,9 @@ if run_btn:
         st.session_state["optimized_portfolio"] = None
         st.warning(f"Error constructing optimized portfolio: {e}")
 
-    # ------------------ Integrated Recommendations ------------------
-    status.info("Integrating recommendations...")
-    # Stress is no longer used; pass an empty dict as the third argument if required
-    try:
-        engine = MarketMancerEngine(forecasts, alpha_preds, {})
-    except TypeError:
-        # Fallback in case the engine only expects two arguments
-        engine = MarketMancerEngine(forecasts, alpha_preds)
-    recs = engine.generate()
-    st.session_state["base_recs"] = recs
-
     t1 = time.time()
     st.success(f"Pipeline completed in {t1 - t0:.1f} seconds.")
+
 
 # -------------------------------------------------------------
 # Display Section (Persists after running pipeline)
@@ -340,7 +330,7 @@ if run_btn:
 forecasts = st.session_state.get("base_forecasts")
 alpha_preds = st.session_state.get("base_alpha")
 factor_eval = st.session_state.get("base_factor_eval")
-recs = st.session_state.get("base_recs")
+
 
 if not forecasts and not alpha_preds:
     st.info("Run the pipeline from the sidebar to generate forecasts.")
@@ -582,12 +572,3 @@ else:
                     st.write("No feature importances available for this ticker.")
     else:
         st.info("No alpha predictions available.")
-
-    # =========================================================
-    # 3. Integrated recommendations
-    # =========================================================
-    st.subheader("Integrated recommendations")
-    if recs:
-        st.json(recs)
-    else:
-        st.info("No integrated recommendations available.")
