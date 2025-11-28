@@ -340,8 +340,8 @@ else:
 
     if forecasts:
         st.caption(
-            "These forecasts estimate each factor’s expected return (in percent) over the next H days, "
-            "where H is the forecast horizon set by the user. The primary forecast uses a simple AR(1) "
+            "These forecasts estimate each factor’s expected return (in percent) over the next *H* days, "
+            "where *H* is the forecast horizon set by the user. The primary forecast uses a simple AR(1) "
             "model on each factor’s own history, while macro features are used for diagnostics and driver "
             "analysis. Higher values indicate a stronger expected tailwind for that factor (candidates to "
             "overweight), while negative values indicate expected headwinds (candidates to underweight)."
@@ -392,7 +392,6 @@ else:
                         "Factor": f,
                         "Ensemble Premium %": v.get("ensemble_forecast", np.nan) * 100.0,
                         "AR(1) Premium %": v.get("ar1_forecast", np.nan) * 100.0,
-                        "Confidence": v.get("confidence", ""),
                     }
                 )
 
@@ -414,8 +413,8 @@ else:
             st.subheader("Top drivers per factor")
             st.caption(
                 "The table below shows which macro features the model found most predictive "
-                "when forecasting each factor’s expected return over the next H days, where H is "
-                "the forecast horizon set by the user. These macro features include rate levels, "
+                "when forecasting each factor’s expected return over the next *H* days. "
+                "These macro features include rate levels, "
                 "term spreads, credit spreads, and volatility measures. More technically, "
                 "'most predictive' means these features produced the largest reductions in forecast "
                 "error in the random forest model, with RF importance measuring the average improvement "
@@ -466,7 +465,7 @@ else:
 
             # Ensemble vs AR(1) comparison in an expander
             with st.expander(
-                "Show model ensemble (Ridge/Lasso/Random Forest) validation metrics"
+                "Show machine learning ensemble validation metrics (Ridge, Lasso, Random Forest)"
             ):
                 st.dataframe(
                     df_eval.style.format(
