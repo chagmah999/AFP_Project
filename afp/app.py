@@ -19,16 +19,14 @@ from afp_app.macro import MacroDataFetcher
 from afp_app.modeling import prepare_modeling_data
 from afp_app.signal_factor_premia import FactorPremiaForecaster
 from afp_app.signal_alpha import AlphaPredictor
-from afp_app.signal_stress import StressProbabilityModel
 from afp_app.engine import MarketMancerEngine
-from afp_app.scenario import scenario_factor_premia, scenario_stress
 from afp_app.optimizer import UnifiedPortfolioOptimizer
 
 
 st.set_page_config(page_title="AFP Forecasting Tool", layout="wide")
 
 st.title("AFP Forecasting Tool")
-st.caption("Factor premia forecasts, stock-level alpha, stress regime, and scenario analysis")
+st.caption("Factor premia forecasts, stock-level alpha, and unified portfolio optimization")
 
 # -------------------------------------------------------------
 # Session State Initialization
@@ -37,22 +35,18 @@ for key, default in [
     ("base_forecasts", None),
     ("base_factor_eval", None),
     ("base_alpha", None),
-    ("base_stress", None),
     ("base_recs", None),
     ("modeling_frame", None),
     ("forecaster_obj", None),
-    ("stress_model_obj", None),
-    # new: store universe and factor score info for later display
+    # store universe and factor score info for later display
     ("universe_tickers", None),
     ("factor_portfolio_sizes", None),
     ("sample_factor_scores", None),
-    # new: store optimized unified portfolio table
+    # store optimized unified portfolio table
     ("optimized_portfolio", None),
-    # new: store the forecast horizon used when pipeline was last run
+    # store the forecast horizon used when pipeline was last run
     ("portfolio_horizon", None),
 ]:
-
-
     if key not in st.session_state:
         st.session_state[key] = default
 
@@ -128,7 +122,6 @@ if run_btn:
     st.session_state["portfolio_horizon"] = int(forecast_horizon)
 
     # ------------------ Universe ------------------
-        # ------------------ Universe ------------------
     status.info("Selecting universe...")
     tickers = get_universe(
         universe_size,
@@ -138,7 +131,6 @@ if run_btn:
 
     # Store universe for later display instead of showing it first
     st.session_state["universe_tickers"] = tickers
-
 
     # ------------------ Data Collection ------------------
     status.info("Fetching fundamentals and prices...")
@@ -211,7 +203,6 @@ if run_btn:
         st.session_state["factor_portfolio_sizes"] = port_sizes
         st.session_state["sample_factor_scores"] = sample
 
-
     # ------------------ Macro Data & Modeling Frame ------------------
     status.info("Fetching macro data...")
     m = MacroDataFetcher(api_key=api_key)
@@ -275,7 +266,6 @@ if run_btn:
 
     st.session_state["base_alpha"] = alpha_preds
 
-    
     # ------------------ Unified Optimized Portfolio (compute only, store in session) ------------------
     status.info("Constructing optimized unified portfolio...")
 
@@ -330,22 +320,14 @@ if run_btn:
         st.session_state["optimized_portfolio"] = None
         st.warning(f"Error constructing optimized portfolio: {e}")
 
-
-
-    # ------------------ Stress Probability ------------------
-    status.info("Estimating market stress probability...")
-    stress_model = StressProbabilityModel()
-    _ = stress_model.fit(modeling)
-    stress_fc = stress_model.predict(modeling)
-
-    st.session_state["stress_model_obj"] = stress_model
-    st.session_state["base_stress"] = stress_fc
-
-    
-
     # ------------------ Integrated Recommendations ------------------
     status.info("Integrating recommendations...")
-    engine = MarketMancerEngine(forecasts, alpha_preds, stress_fc or {})
+    # Stress is no longer used; pass an empty dict as the third argument if required
+    try:
+        engine = MarketMancerEngine(forecasts, alpha_preds, {})
+    except TypeError:
+        # Fallback in case the engine only expects two arguments
+        engine = MarketMancerEngine(forecasts, alpha_preds)
     recs = engine.generate()
     st.session_state["base_recs"] = recs
 
@@ -357,14 +339,10 @@ if run_btn:
 # -------------------------------------------------------------
 forecasts = st.session_state.get("base_forecasts")
 alpha_preds = st.session_state.get("base_alpha")
-stress_fc = st.session_state.get("base_stress")
 factor_eval = st.session_state.get("base_factor_eval")
-modeling = st.session_state.get("modeling_frame")
-forecaster = st.session_state.get("forecaster_obj")
-stress = st.session_state.get("stress_model_obj")
 recs = st.session_state.get("base_recs")
 
-if not forecasts and not alpha_preds and not stress_fc:
+if not forecasts and not alpha_preds:
     st.info("Run the pipeline from the sidebar to generate forecasts.")
 else:
     # =========================================================
@@ -469,9 +447,6 @@ else:
                 )
     else:
         st.info("No factor forecasts available.")
-      
-
-    
 
     # =========================================================
     # 1.b Universe and factor score details (after premia)
@@ -516,41 +491,34 @@ else:
             ),
             use_container_width=True,
         )
-    
-        # --- New: portfolio-level expected H-day alpha with dynamic H ---
+
+        # --- Portfolio-level expected H-day alpha with dynamic H ---
         try:
             portfolio_alpha_decimal = (
                 optimized_portfolio["weight"]
                 * (optimized_portfolio["expected_alpha_%"] / 100.0)
             ).sum()
-    
+
             portfolio_alpha_pct = portfolio_alpha_decimal * 100.0
-    
+
             # Use the horizon from the last pipeline run if available
             horizon_used = st.session_state.get("portfolio_horizon")
             if horizon_used is None:
                 # Fallback to current slider value if something went wrong
                 horizon_used = int(forecast_horizon)
-    
+
             st.markdown(
                 f"**Portfolio expected {horizon_used}-day alpha:** "
                 f"{portfolio_alpha_pct:.2f}%"
             )
         except Exception:
             pass
-
     else:
         st.info(
             "No unified optimized portfolio is available. "
             "This can happen if there are too few tickers with both "
             "alpha predictions and sufficient return history."
         )
-    
-
-    
-        
-
-
 
     # =========================================================
     # 2. Alpha predictions
@@ -616,183 +584,10 @@ else:
         st.info("No alpha predictions available.")
 
     # =========================================================
-    # 3. Stress regime
-    # =========================================================
-    st.subheader("Stress regime")
-
-    if stress_fc:
-        line = (
-            f"Regime: **{stress_fc['regime']}**  |  "
-            f"Stress probability: **{stress_fc['stress_probability']*100:.1f}%**"
-        )
-
-        auc = getattr(stress, "cv_auc_mean", None)
-        share = getattr(stress, "stress_share", None)
-
-        if auc is not None:
-            line += f"  |  Model AUC: **{auc:.3f}**"
-        if share is not None:
-            line += f"  |  Historical stress frequency: **{share*100:.1f}%**"
-
-        st.write(line)
-
-        # Key indicators table
-        key_ind = stress_fc.get("key_indicators", {})
-        if key_ind:
-            st.markdown("Key indicators at latest date:")
-            df_ind = pd.DataFrame(
-                [{"Indicator": k, "Value": v} for k, v in key_ind.items()]
-            )
-            st.dataframe(
-                df_ind.style.format({"Value": "{:.3f}"}),
-                use_container_width=True,
-            )
-    else:
-        st.info("No stress regime forecast available.")
-
-    # =========================================================
-    # 4. Integrated recommendations
+    # 3. Integrated recommendations
     # =========================================================
     st.subheader("Integrated recommendations")
     if recs:
         st.json(recs)
     else:
         st.info("No integrated recommendations available.")
-
-# -------------------------------------------------------------
-# Sensitivity Analysis (uses stored base results)
-# -------------------------------------------------------------
-forecasts = st.session_state.get("base_forecasts")
-alpha_preds = st.session_state.get("base_alpha")
-stress_fc = st.session_state.get("base_stress")
-modeling = st.session_state.get("modeling_frame")
-forecaster = st.session_state.get("forecaster_obj")
-stress = st.session_state.get("stress_model_obj")
-
-if forecasts and modeling is not None and forecaster and stress:
-    st.markdown("---")
-    st.subheader("Sensitivity analysis")
-
-    st.caption(
-        "Apply macro shocks to the latest feature vector to see how "
-        "factor premium forecasts and stress probability would change."
-    )
-
-    # Slider keys
-    SENS_KEYS = ["scn_rates", "scn_102y", "scn_103m", "scn_credit", "scn_vix"]
-
-    # Reset function
-    def _reset_sensitivity():
-        """
-        Reset slider values to zero.
-        """
-        for k in SENS_KEYS:
-            st.session_state[k] = 0
-
-    col_reset, col_run = st.columns([1, 1])
-
-    with col_reset:
-        st.button("Reset shocks to 0", on_click=_reset_sensitivity)
-
-    with col_run:
-        run_scen_btn = st.button("Run sensitivity scenario")
-
-    # ---------------- Sliders ----------------
-    colL, colR = st.columns([1, 1])
-
-    with colL:
-        shock_rates = st.slider(
-            "Rates level shock (bps)",
-            -300, 300, 0, step=5, key="scn_rates"
-        )
-        shock_term_10y2y = st.slider(
-            "10y minus 2y term spread shock (bps)",
-            -200, 200, 0, step=5, key="scn_102y"
-        )
-        shock_term_10y3m = st.slider(
-            "10y minus 3m term spread shock (bps)",
-            -300, 300, 0, step=5, key="scn_103m"
-        )
-
-    with colR:
-        shock_credit = st.slider(
-            "Credit spread shock (bps)",
-            -300, 300, 0, step=5, key="scn_credit"
-        )
-        shock_vix = st.slider(
-            "VIX level shock (%)",
-            -50, 200, 0, step=5, key="scn_vix"
-        )
-
-    # ---------------- Run scenario ----------------
-    if run_scen_btn:
-        shocks = {
-            "rates_bp": shock_rates,
-            "term_10y2y_bp": shock_term_10y2y,
-            "term_10y3m_bp": shock_term_10y3m,
-            "credit_bp": shock_credit,
-            "vix_pct": shock_vix,
-        }
-
-        # Factor scenarios
-        scen_rows = []
-        for f, base_fc in forecasts.items():
-            scen_fc = scenario_factor_premia(
-                forecaster=forecaster,
-                modeling=modeling,
-                factor=f,
-                shocks=shocks,
-            )
-            if scen_fc is None:
-                continue
-
-            base_val = base_fc["ensemble_forecast"] * 100.0
-            scen_val = scen_fc["ensemble_forecast"] * 100.0
-            delta_bp = (scen_val - base_val) * 100.0
-
-            scen_rows.append(
-                {
-                    "Factor": f,
-                    "Base premium %": base_val,
-                    "Scenario premium %": scen_val,
-                    "Delta (bp)": delta_bp,
-                }
-            )
-
-        if scen_rows:
-            st.markdown("**Factor premium scenario results**")
-            df_scen = pd.DataFrame(scen_rows).sort_values("Factor")
-            st.dataframe(
-                df_scen.style.format(
-                    {
-                        "Base premium %": "{:.2f}",
-                        "Scenario premium %": "{:.2f}",
-                        "Delta (bp)": "{:.1f}",
-                    }
-                ),
-                use_container_width=True,
-            )
-
-        # Stress scenario
-        scen_stress = scenario_stress(
-            stress_model=stress,
-            data=modeling,
-            shocks=shocks,
-        )
-
-        if scen_stress and stress_fc:
-            base_prob = stress_fc["stress_probability"] * 100.0
-            scen_prob = scen_stress["stress_probability"] * 100.0
-            delta_prob = scen_prob - base_prob
-
-            st.markdown("**Stress probability scenario result**")
-            st.write(
-                f"Base regime **{stress_fc['regime']}** "
-                f"({base_prob:.1f}%) -> "
-                f"Scenario regime **{scen_stress['regime']}** "
-                f"({scen_prob:.1f}%) "
-                f"| Change: **{delta_prob:.1f} percentage points**"
-            )
-else:
-    st.markdown("---")
-    st.info("Run the pipeline first to enable sensitivity analysis.")
