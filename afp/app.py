@@ -481,37 +481,55 @@ else:
 
     # ------------------ Optimized unified portfolio ------------------
     st.subheader("Optimized unified portfolio")
-    
+
     if alpha_preds and prices is not None:
         try:
-            optimizer = UnifiedPortfolioOptimizer(
-                forecast_horizon=forecast_horizon,
-                risk_aversion=50.0,
-                max_weight=0.05,
-                max_gross=1.5,
-            )
-    
-            # 1. Determine consistent tickers for optimization
-            all_tickers = list(alpha_preds.keys())
-    
-            # 2. Covariance + reduced ticker set
-            Sigma, valid_tickers = optimizer.build_covariance(prices, all_tickers)
-    
-            if len(valid_tickers) < 2:
-                st.info("Not enough valid tickers to build a unified portfolio.")
+            # Use only tickers for which we have alpha predictions and price data
+            all_price_tickers = set(prices["ticker"].unique())
+            universe_tickers = sorted(all_price_tickers & set(alpha_preds.keys()))
+            if len(universe_tickers) < 2:
+                st.info("Not enough overlapping tickers with alpha and prices to build a portfolio.")
             else:
-                # 3. Expected returns using same reduced ticker set
-                mu = optimizer.build_expected_returns(alpha_preds, valid_tickers)
-    
-                # 4. Optimize
-                w = optimizer.optimize(mu, Sigma, long_only=False)
-    
-                # 5. Display table
-                table = optimizer.build_portfolio_table(w, alpha_preds)
-                st.dataframe(table, use_container_width=True)
-    
+                optimizer = UnifiedPortfolioOptimizer(
+                    risk_aversion=50.0,
+                    max_gross=1.5,
+                    max_weight=0.05,
+                )
+
+                # Expected returns from alpha predictions
+                mu = optimizer.build_expected_returns(alpha_preds, universe_tickers)
+
+                # Covariance from recent daily returns (e.g. 252 days)
+                Sigma = optimizer.build_covariance(
+                    price_data=prices,
+                    tickers=universe_tickers,
+                    lookback_days=252,
+                )
+
+                if Sigma is None or Sigma.empty:
+                    st.info("Not enough return history to estimate a covariance matrix.")
+                else:
+                    # Long/short optimized portfolio
+                    w = optimizer.optimize(mu, Sigma, long_only=False)
+
+                    table = optimizer.build_portfolio_table(w, alpha_preds)
+                    st.markdown(
+                        "This portfolio combines per-stock alpha forecasts "
+                        "with recent return covariance to produce a single, "
+                        "risk-adjusted long/short portfolio over the universe."
+                    )
+                    st.dataframe(
+                        table.style.format(
+                            {
+                                "weight": "{:.3f}",
+                                "expected_alpha_%": "{:.2f}",
+                            }
+                        ),
+                        use_container_width=True,
+                    )
         except Exception as e:
-            st.error(f"Error constructing unified portfolio: {e}")
+            st.warning(f"Error constructing unified portfolio: {e}")
+
     
         
 
