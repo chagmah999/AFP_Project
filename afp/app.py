@@ -48,7 +48,10 @@ for key, default in [
     ("sample_factor_scores", None),
     # new: store optimized unified portfolio table
     ("optimized_portfolio", None),
+    # new: store the forecast horizon used when pipeline was last run
+    ("portfolio_horizon", None),
 ]:
+
 
     if key not in st.session_state:
         st.session_state[key] = default
@@ -120,6 +123,9 @@ if run_btn:
     if not api_key:
         st.error("Please enter a valid FMP API key.")
         st.stop()
+
+    # Remember the horizon used for this run
+    st.session_state["portfolio_horizon"] = int(forecast_horizon)
 
     # ------------------ Universe ------------------
         # ------------------ Universe ------------------
@@ -511,10 +517,8 @@ else:
             use_container_width=True,
         )
     
-        # --- New: portfolio-level expected H-day alpha ---
+        # --- New: portfolio-level expected H-day alpha with dynamic H ---
         try:
-            # expected_alpha_% is in percent, so convert back to decimal
-            # portfolio_alpha_decimal = sum_i w_i * alpha_i
             portfolio_alpha_decimal = (
                 optimized_portfolio["weight"]
                 * (optimized_portfolio["expected_alpha_%"] / 100.0)
@@ -522,12 +526,19 @@ else:
     
             portfolio_alpha_pct = portfolio_alpha_decimal * 100.0
     
+            # Use the horizon from the last pipeline run if available
+            horizon_used = st.session_state.get("portfolio_horizon")
+            if horizon_used is None:
+                # Fallback to current slider value if something went wrong
+                horizon_used = int(forecast_horizon)
+    
             st.markdown(
-                f"**Portfolio expected H-day alpha:** "
+                f"**Portfolio expected {horizon_used}-day alpha:** "
                 f"{portfolio_alpha_pct:.2f}%"
             )
         except Exception:
             pass
+
     else:
         st.info(
             "No unified optimized portfolio is available. "
