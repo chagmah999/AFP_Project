@@ -624,7 +624,7 @@ else:
             pass
 
         # Driver details for each of the top 10 stocks
-        st.markdown("Top drivers for each of the top 10 stocks")
+        st.markdown("**Top drivers for each of the top 10 stocks**")
         st.caption(
             "For each stock, the model predicts its expected *H*-day alpha using a Lasso regression trained on "
             "historical data. All input features are standardized before estimation, so each coefficient measures "
