@@ -110,43 +110,93 @@ class UnifiedPortfolioOptimizer:
         Sigma: pd.DataFrame,
         long_only: bool = False,
     ) -> pd.Series:
+        """
+        Produce a vector of portfolio weights given expected returns mu and covariance Sigma.
+
+        Heuristic:
+          - If long_only: weights ∝ max(mu, 0)
+          - If long/short: use risk-adjusted alpha mu / var_i
+            • go long on positive scores, short on negative scores
+            • scale longs and shorts so gross exposure ≈ self.max_gross
+            • cap |w_i| ≤ self.max_weight
+        """
         if mu is None or mu.empty:
             return pd.Series(dtype=float)
 
         tickers = list(mu.index)
         n = len(tickers)
+        if n == 0:
+            return pd.Series(dtype=float)
 
+        # If we do not have a valid covariance, fall back to simple alpha-only logic
         if Sigma is None or Sigma.empty:
-            # fallback: no covariance → simple ranking alpha portfolio
-            raw = mu - mu.mean()
-        else:
-            # risk-adjusted return
-            var = np.diag(Sigma.values)
-            var = np.where(var <= 0, 1e-6, var)
-            raw = mu.values / (self.risk_aversion * var)
+            if long_only:
+                raw = np.clip(mu.values, a_min=0.0, a_max=None)
+                if raw.sum() <= 0:
+                    return pd.Series(dtype=float)
+                w = raw / raw.sum()
+            else:
+                scores = mu.values
+                pos = np.clip(scores, a_min=0.0, a_max=None)
+                neg = np.clip(-scores, a_min=0.0, a_max=None)
 
-        # dollar-neutral unless long-only
-        if not long_only:
-            raw = raw - raw.mean()
+                w = np.zeros(n)
+                if pos.sum() > 0:
+                    w += pos / pos.sum()
+                if neg.sum() > 0:
+                    w -= neg / neg.sum()
 
-        # clip per name
-        raw = np.clip(raw, -self.max_weight, self.max_weight)
+                # Scale to respect gross cap
+                gross = np.sum(np.abs(w))
+                if gross > 0:
+                    scale = min(self.max_gross / gross, 1.0)
+                    w *= scale
+            # Clip per-name weights
+            w = np.clip(w, -self.max_weight, self.max_weight)
+            return pd.Series(w, index=tickers, name="weight")
 
-        # enforce gross exposure limit
-        gross = np.sum(np.abs(raw))
-        if gross > self.max_gross and gross > 0:
-            raw *= self.max_gross / gross
+        # Use diagonal of Sigma as variance proxy
+        Sigma = Sigma.loc[mu.index, mu.index]  # align
+        diag = np.diag(Sigma.values)
+        diag = np.where(diag <= 0, 1e-6, diag)
 
         if long_only:
-            raw = np.clip(raw, 0, self.max_weight)
-            total = raw.sum()
-            if total > 0:
-                raw /= total  # sum to 1
+            # Long-only: risk-adjusted alpha, but no shorts
+            scores = mu.values / np.sqrt(diag)
+            scores = np.clip(scores, a_min=0.0, a_max=None)
+            if scores.sum() <= 0:
+                return pd.Series(dtype=float)
+            w = scores / scores.sum()
+        else:
+            # Long/short: risk-adjusted alpha, separate long and short books
+            scores = mu.values / np.sqrt(diag)
 
-        # name the result
-        w = pd.Series(raw, index=tickers, name="weight")
+            pos = np.clip(scores, a_min=0.0, a_max=None)
+            neg = np.clip(-scores, a_min=0.0, a_max=None)
 
-        return w
+            w = np.zeros(n)
+
+            # Target gross half for longs, half for shorts (dollar-neutral)
+            target_gross = min(self.max_gross, 1.0)
+            target_long = target_gross / 2.0
+            target_short = target_gross / 2.0
+
+            if pos.sum() > 0:
+                w_long = pos / pos.sum() * target_long
+                w += w_long
+            if neg.sum() > 0:
+                w_short = neg / neg.sum() * target_short
+                w -= w_short
+
+        # Enforce per-name cap
+        w = np.clip(w, -self.max_weight, self.max_weight)
+
+        # If gross still too large, rescale
+        gross = np.sum(np.abs(w))
+        if gross > self.max_gross and gross > 0:
+            w *= self.max_gross / gross
+
+        return pd.Series(w, index=tickers, name="weight")
 
     # -------------------------------------------------------------
     # 4. Build final portfolio table
