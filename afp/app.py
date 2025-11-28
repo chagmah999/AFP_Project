@@ -477,10 +477,15 @@ else:
     optimized_portfolio = st.session_state.get("optimized_portfolio")
 
     if isinstance(optimized_portfolio, pd.DataFrame) and not optimized_portfolio.empty:
-        st.markdown(
-            "This portfolio combines per-stock alpha forecasts "
-            "with recent return covariance to produce a single, "
-            "risk-adjusted long/short portfolio over the universe."
+        st.caption(
+            "This section shows a unified long/short portfolio built from the model’s *H*-day stock-level alpha forecasts. "
+            "The optimizer chooses weights that maximize expected *H*-day portfolio alpha relative to portfolio risk, "
+            "where risk is measured using a Ledoit–Wolf shrinkage estimate of the recent return covariance matrix. "
+            "Stocks with higher expected alpha and more favorable risk characteristics receive higher positive weights "
+            "(long positions), while stocks with negative expected alpha receive negative weights (short positions). "
+            "For stability, the portfolio enforces practical constraints: no individual position may exceed the per-stock "
+            "weight cap (currently 10%), and total gross exposure is limited (currently at 1.5x the portfolio’s "
+            "capital). The table reports each stock’s portfolio weight, side, and its own expected *H*-day alpha in percent."
         )
         st.dataframe(
             optimized_portfolio.style.format(
