@@ -62,32 +62,44 @@ class UnifiedPortfolioOptimizer:
         price_data: pd.DataFrame,
         tickers: List[str],
         lookback_days: int = 252,
-    ) -> pd.DataFrame:
+    ) -> tuple[pd.DataFrame, List[str]]:
+        """
+        Return (Sigma, valid_tickers)
+        Sigma is shrinkage covariance estimated only on tickers
+        that have sufficient price history.
+        """
         if price_data is None or price_data.empty:
-            return pd.DataFrame()
-
+            return pd.DataFrame(), []
+    
         df = price_data[price_data["ticker"].isin(tickers)].copy()
         if df.empty:
-            return pd.DataFrame()
-
+            return pd.DataFrame(), []
+    
         df = df.sort_values("date")
         retcol = "log_returns" if "log_returns" in df.columns else "returns"
-
-        # last N days only
+    
+        # restrict to recent window
         unique_dates = df["date"].drop_duplicates().sort_values()
         if len(unique_dates) > lookback_days:
             cutoff = unique_dates.iloc[-lookback_days]
             df = df[df["date"] >= cutoff]
-
-        pivot = df.pivot(index="date", columns="ticker", values=retcol).dropna(how="all")
-
-        if pivot.shape[0] < 50:  # too few days
-            return pd.DataFrame()
-
+    
+        pivot = df.pivot(index="date", columns="ticker", values=retcol)
+    
+        # Determine which tickers have at least 50 non-null observations
+        valid = pivot.count()[pivot.count() >= 50].index.tolist()
+    
+        if len(valid) < 2:  # cannot estimate covariance
+            return pd.DataFrame(), []
+    
+        pivot_valid = pivot[valid].fillna(0.0)
+    
         # Ledoit–Wolf shrinkage covariance
-        lw = LedoitWolf().fit(pivot.fillna(0.0).values)
-        Sigma = pd.DataFrame(lw.covariance_, index=tickers, columns=tickers)
-        return Sigma
+        lw = LedoitWolf().fit(pivot_valid.values)
+        Sigma = pd.DataFrame(lw.covariance_, index=valid, columns=valid)
+    
+        return Sigma, valid
+
 
     # -------------------------------------------------------------
     # 3. Solve for mean–variance weights
