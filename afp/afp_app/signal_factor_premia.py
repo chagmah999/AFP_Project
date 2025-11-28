@@ -390,6 +390,34 @@ class FactorPremiaForecaster:
 
         ensemble = float(np.mean(list(preds.values())))
 
+        # ------------------------------------------------------
+        # AR(1) baseline forecast on the forward factor premium
+        # y_t = a + b * y_{t-1}
+        # ------------------------------------------------------
+        # Use the same target y that was built in prepare_features_targets
+        y_lag_all = y.shift(1)
+
+        mask = y.notna() & y_lag_all.notna()
+        y_curr = y[mask]
+        y_lag = y_lag_all[mask]
+
+        if len(y_curr) >= 20:
+            # Simple OLS via polyfit: y ≈ b * y_lag + a
+            b, a = np.polyfit(y_lag.values, y_curr.values, 1)
+        else:
+            # Fallback: constant equal to mean of y
+            a = float(y.mean())
+            b = 0.0
+
+        # For the next forecast, use the last available y as y_T
+        if y.dropna().empty:
+            last_y = 0.0
+        else:
+            last_y = float(y.dropna().iloc[-1])
+
+        ar1_forecast = a + b * last_y
+
+
         # Top drivers from stored feature importance
         drivers = self.feature_importance.get(target_factor, None)
         top = []
@@ -415,6 +443,7 @@ class FactorPremiaForecaster:
             "factor": target_factor,
             "forecast_horizon_days": self.forecast_horizon,
             "ensemble_forecast": ensemble,
+            "ar1_forecast": float(ar1_forecast),
             "model_forecasts": preds,
             "top_drivers": top,
             "forecast_date": (
@@ -422,5 +451,6 @@ class FactorPremiaForecaster:
             ),
             "confidence": conf,
         }
+
 
         return forecast
