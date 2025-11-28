@@ -46,7 +46,6 @@ for key, default in [
     # store the forecast horizon used when pipeline was last run
     ("portfolio_horizon", None),
 ]:
-
     if key not in st.session_state:
         st.session_state[key] = default
 
@@ -331,7 +330,6 @@ forecasts = st.session_state.get("base_forecasts")
 alpha_preds = st.session_state.get("base_alpha")
 factor_eval = st.session_state.get("base_factor_eval")
 
-
 if not forecasts and not alpha_preds:
     st.info("Run the pipeline from the sidebar to generate forecasts.")
 else:
@@ -341,21 +339,29 @@ else:
     st.subheader("Factor premia forecasts")
 
     if forecasts:
-        # 1. Main view: AR(1) expected premium per factor
+        st.caption(
+            "These forecasts estimate each factor’s expected return (in percent) over the next H days, "
+            "where H is the forecast horizon set by the user. The primary forecast uses a simple AR(1) "
+            "model on each factor’s own history, while macro features are used for diagnostics and driver "
+            "analysis. Higher values indicate a stronger expected tailwind for that factor (candidates to "
+            "overweight), while negative values indicate expected headwinds (candidates to underweight)."
+        )
+
+        # 1a. Main view: AR(1) expected premium per factor
         summary_rows = []
         drivers_rows = []
-    
+
         for f, v in forecasts.items():
             # Prefer AR(1); if missing for any reason, fall back to ensemble
             ar1_fc = v.get("ar1_forecast", v.get("ensemble_forecast", 0.0))
-    
+
             summary_rows.append(
                 {
                     "Factor": f,
                     "Expected Premium % (AR(1))": ar1_fc * 100.0,
                 }
             )
-    
+
             for d in (v.get("top_drivers") or []):
                 drivers_rows.append(
                     {
@@ -364,7 +370,7 @@ else:
                         "RF Importance": d.get("rf_importance"),
                     }
                 )
-    
+
         df_summary = pd.DataFrame(summary_rows).sort_values(
             "Expected Premium % (AR(1))", ascending=False
         )
@@ -374,48 +380,55 @@ else:
             ),
             use_container_width=True,
         )
-    
-        # Driver importance table (still visible, but secondary)
+
+        # 1b. Optional ensemble view in an expander
+        with st.expander(
+            "Show machine learning ensemble factor forecasts (Ridge, Lasso, Random Forest)"
+        ):
+            ensemble_rows = []
+            for f, v in forecasts.items():
+                ensemble_rows.append(
+                    {
+                        "Factor": f,
+                        "Ensemble Premium %": v.get("ensemble_forecast", np.nan) * 100.0,
+                        "AR(1) Premium %": v.get("ar1_forecast", np.nan) * 100.0,
+                        "Confidence": v.get("confidence", ""),
+                    }
+                )
+
+            df_ensemble = pd.DataFrame(ensemble_rows).sort_values(
+                "Ensemble Premium %", ascending=False
+            )
+            st.dataframe(
+                df_ensemble.style.format(
+                    {
+                        "Ensemble Premium %": "{:.2f}",
+                        "AR(1) Premium %": "{:.2f}",
+                    }
+                ),
+                use_container_width=True,
+            )
+
+        # 1c. Top drivers per factor
         if drivers_rows:
-            st.markdown("Top drivers per factor")
+            st.subheader("Top drivers per factor")
+            st.caption(
+                "The table below shows which macro features the model found most predictive "
+                "when forecasting each factor’s expected return over the next H days, where H is "
+                "the forecast horizon set by the user. These macro features include rate levels, "
+                "term spreads, credit spreads, and volatility measures. More technically, "
+                "'most predictive' means these features produced the largest reductions in forecast "
+                "error in the random forest model, with RF importance measuring the average improvement "
+                "in fit when that feature is used across the trees."
+            )
+
             df_drivers = pd.DataFrame(drivers_rows)
             st.dataframe(
                 df_drivers.style.format({"RF Importance": "{:.3f}"}),
                 use_container_width=True,
             )
 
-  
-
-        st.dataframe(
-            df_summary.style.format(
-                {"Expected Premium % (ensemble)": "{:.2f}"}
-            ),
-            use_container_width=True,
-        )
-
-        # Driver importance table (still visible, but secondary)
-        if drivers_rows:
-            st.subheader("Top drivers per factor")
-            st.markdown(
-                "The table below shows which macro features the model found most predictive "
-                "when forecasting each factor’s expected return over the next *H* days, where *H* is "
-                "the forecast horizon set by the user. "
-                "These macro features include rate levels, term spreads, credit spreads, and volatility measures. "
-                "More technically, 'most predictive' means these features produced the largest reductions "
-                "in forecast error in the random forest model, with RF importance measuring the average "
-                "improvement in fit when that feature is used across the trees."
-            )
-            
-
-        df_drivers = pd.DataFrame(drivers_rows)
-        st.dataframe(
-            df_drivers.style.format({"RF Importance": "{:.3f}"}),
-            use_container_width=True,
-        )
-
-
-        # Validation summary
-        # AR(1) metrics shown up front, ensemble metrics tucked inside an expander
+        # 1d. Validation summary: AR(1) vs ensemble
         if factor_eval:
             st.markdown("### Factor signal validation (walk-forward)")
 
@@ -451,9 +464,10 @@ else:
                 use_container_width=True,
             )
 
-            # Ensemble vs AR(1) comparison in an expander so it can be
-            # easily removed later if we abandon Ridge/Lasso/RF
-            with st.expander("Show model ensemble (Ridge/Lasso/Random Forest) metrics"):
+            # Ensemble vs AR(1) comparison in an expander
+            with st.expander(
+                "Show model ensemble (Ridge/Lasso/Random Forest) validation metrics"
+            ):
                 st.dataframe(
                     df_eval.style.format(
                         {
