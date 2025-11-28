@@ -1,59 +1,225 @@
+# afp_app/engine.py
+
+from __future__ import annotations
+
+from typing import Dict, Any
+
 import numpy as np
-from datetime import datetime
+import pandas as pd
+
 
 class MarketMancerEngine:
-    def __init__(self, factor_forecasts: dict, alpha_predictions: dict, stress_forecast: dict):
-        self.factor_forecasts = factor_forecasts or {}
-        self.alpha_predictions = alpha_predictions or {}
-        self.stress_forecast = stress_forecast or {}
+    """
+    MarketMancerEngine
 
-    def generate(self) -> dict:
-        recs = {
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "risk_regime": self.stress_forecast.get("regime", "UNKNOWN"),
-            "factor_tilts": {},
-            "stock_picks": [],
-            "summary": ""
+    This class takes the model outputs produced by the pipeline
+    and turns them into a simple, human-readable set of
+    "recommendations" for factors and single-name stocks.
+
+    Inputs:
+      - factor_forecasts: dict keyed by factor name
+          Each value is expected to contain at least:
+            {
+              "ensemble_forecast": float,   # H-day expected premium (in decimal form)
+              ... (other fields ignored here)
+            }
+
+      - alpha_preds: dict keyed by ticker
+          Each value is expected to contain at least:
+            {
+              "expected_alpha": float,      # H-day expected idiosyncratic return (decimal)
+              "drivers": {...},             # may include fundamental_score, features, etc.
+            }
+
+      - stress: kept only for backwards compatibility with older versions
+        of the app. It is ignored in this simplified engine.
+
+    Output (via generate()):
+      A dictionary with three sections:
+        {
+          "factors": {
+              "top_overweight": [...],
+              "top_underweight": [...],
+          },
+          "stocks": {
+              "top_longs": [...],
+              "top_shorts": [...],
+          },
+          "meta": {
+              "description": "...",
+          }
         }
-        risk_adj = 1.0
-        if self.stress_forecast:
-            r = self.stress_forecast.get("regime")
-            if r == "HIGH RISK":
-                risk_adj = 0.3
-            elif r == "ELEVATED":
-                risk_adj = 0.7
 
-        if self.factor_forecasts:
-            ordered = sorted(self.factor_forecasts.items(), key=lambda kv: kv[1]["ensemble_forecast"], reverse=True)
-            for f, fc in ordered:
-                er = fc["ensemble_forecast"]
-                size = float(np.clip(er * 10 * risk_adj, -1, 1))
-                recs["factor_tilts"][f] = {
-                    "expected_premium": er,
-                    "position": "LONG" if size > 0 else "SHORT",
-                    "size": abs(size),
-                    "confidence": fc.get("confidence","Medium")
+      The exact structure is easy to inspect in the Streamlit app
+      and is deliberately simple so it is easy to explain to sponsors.
+    """
+
+    def __init__(
+        self,
+        factor_forecasts: Dict[str, dict] | None,
+        alpha_preds: Dict[str, dict] | None,
+        stress: Any | None = None,
+    ) -> None:
+        # Store inputs, falling back to empty dicts if None
+        self.factor_forecasts = factor_forecasts or {}
+        self.alpha_preds = alpha_preds or {}
+        # Stress is ignored by design, but kept in the signature so that
+        # older code that passed a third argument still runs without error.
+        self.stress = None
+
+    # -------------------------------------------------------------
+    # Helper: build factor summary DataFrame
+    # -------------------------------------------------------------
+    def _build_factor_df(self) -> pd.DataFrame:
+        rows = []
+        for name, info in self.factor_forecasts.items():
+            if info is None:
+                continue
+            prem = info.get("ensemble_forecast", None)
+            if prem is None:
+                continue
+            rows.append(
+                {
+                    "factor": name,
+                    "expected_premium_dec": float(prem),
+                    "expected_premium_pct": float(prem) * 100.0,
                 }
+            )
 
-        if self.alpha_predictions:
-            ordered = sorted(self.alpha_predictions.items(), key=lambda kv: kv[1]["expected_alpha"], reverse=True)
-            for tk, pred in ordered[:5]:
-                recs["stock_picks"].append({
+        if not rows:
+            return pd.DataFrame(columns=["factor", "expected_premium_dec", "expected_premium_pct"])
+
+        df = pd.DataFrame(rows)
+        df = df.sort_values("expected_premium_dec", ascending=False).reset_index(drop=True)
+        return df
+
+    # -------------------------------------------------------------
+    # Helper: build alpha summary DataFrame
+    # -------------------------------------------------------------
+    def _build_alpha_df(self) -> pd.DataFrame:
+        rows = []
+        for tk, info in self.alpha_preds.items():
+            if info is None:
+                continue
+            alpha_dec = info.get("expected_alpha", None)
+            if alpha_dec is None:
+                continue
+
+            drivers = info.get("drivers", {}) or {}
+            rows.append(
+                {
                     "ticker": tk,
-                    "expected_alpha": float(pred["expected_alpha"]),
-                    "position_size": float(np.clip(pred["expected_alpha"] * 20 * risk_adj, 0, 0.1))
-                })
+                    "expected_alpha_dec": float(alpha_dec),
+                    "expected_alpha_pct": float(alpha_dec) * 100.0,
+                    "fundamental_score": drivers.get("fundamental_score", None),
+                }
+            )
 
-        parts = []
-        if self.stress_forecast:
-            parts.append(f"Market regime {self.stress_forecast['regime']} "
-                         f"(stress probability {self.stress_forecast['stress_probability']*100:.1f}%)")
-        if recs["factor_tilts"]:
-            top = list(recs["factor_tilts"].keys())[0]
-            parts.append(f"Favor {top} factor "
-                         f"(expected premium {recs['factor_tilts'][top]['expected_premium']*100:.2f}%)")
-        if recs["stock_picks"]:
-            parts.append(f"Top pick {recs['stock_picks'][0]['ticker']} "
-                         f"(expected alpha {recs['stock_picks'][0]['expected_alpha']*100:.2f}%)")
-        recs["summary"] = ". ".join(parts)
-        return recs
+        if not rows:
+            return pd.DataFrame(columns=["ticker", "expected_alpha_dec", "expected_alpha_pct", "fundamental_score"])
+
+        df = pd.DataFrame(rows)
+        df = df.sort_values("expected_alpha_dec", ascending=False).reset_index(drop=True)
+        return df
+
+    # -------------------------------------------------------------
+    # Main public method: generate recommendation object
+    # -------------------------------------------------------------
+    def generate(self) -> Dict[str, Any]:
+        """
+        Build a simple recommendation dictionary based on:
+
+          - factor forecasts (which factors to overweight / underweight)
+          - single-name alpha forecasts (which stocks to tilt long / short)
+
+        There is deliberately no use of a stress regime or
+        complex scenario logic in this engine. Everything is
+        transparent and directly tied to the model outputs.
+        """
+
+        # ---------- Factor recommendations ----------
+        df_factors = self._build_factor_df()
+        factor_recs: Dict[str, Any] = {
+            "top_overweight": [],
+            "top_underweight": [],
+        }
+
+        if not df_factors.empty:
+            # Top 3 positive premia: overweight
+            top_over = df_factors.head(3)
+            for _, row in top_over.iterrows():
+                if row["expected_premium_dec"] <= 0:
+                    continue
+                factor_recs["top_overweight"].append(
+                    {
+                        "factor": row["factor"],
+                        "expected_premium_pct": row["expected_premium_pct"],
+                        "direction": "overweight",
+                    }
+                )
+
+            # Bottom 3 premia (most negative): underweight
+            bottom_under = df_factors.sort_values(
+                "expected_premium_dec", ascending=True
+            ).head(3)
+            for _, row in bottom_under.iterrows():
+                if row["expected_premium_dec"] >= 0:
+                    continue
+                factor_recs["top_underweight"].append(
+                    {
+                        "factor": row["factor"],
+                        "expected_premium_pct": row["expected_premium_pct"],
+                        "direction": "underweight",
+                    }
+                )
+
+        # ---------- Stock recommendations ----------
+        df_alpha = self._build_alpha_df()
+        stock_recs: Dict[str, Any] = {
+            "top_longs": [],
+            "top_shorts": [],
+        }
+
+        if not df_alpha.empty:
+            # Top 10 positive alphas: candidates for long tilt
+            top_longs = df_alpha[df_alpha["expected_alpha_dec"] > 0].head(10)
+            for _, row in top_longs.iterrows():
+                stock_recs["top_longs"].append(
+                    {
+                        "ticker": row["ticker"],
+                        "expected_alpha_pct": row["expected_alpha_pct"],
+                        "fundamental_score": row.get("fundamental_score", None),
+                    }
+                )
+
+            # Top 10 negative alphas: candidates for short / underweight tilt
+            top_shorts = (
+                df_alpha[df_alpha["expected_alpha_dec"] < 0]
+                .sort_values("expected_alpha_dec", ascending=True)
+                .head(10)
+            )
+            for _, row in top_shorts.iterrows():
+                stock_recs["top_shorts"].append(
+                    {
+                        "ticker": row["ticker"],
+                        "expected_alpha_pct": row["expected_alpha_pct"],
+                        "fundamental_score": row.get("fundamental_score", None),
+                    }
+                )
+
+        # ---------- Meta info ----------
+        meta = {
+            "description": (
+                "Recommendations are based solely on factor premia forecasts "
+                "and per-stock alpha forecasts. No stress regime or scenario "
+                "logic is used in this engine."
+            ),
+            "num_factors": int(len(self.factor_forecasts)),
+            "num_alpha_names": int(len(self.alpha_preds)),
+        }
+
+        return {
+            "factors": factor_recs,
+            "stocks": stock_recs,
+            "meta": meta,
+        }
