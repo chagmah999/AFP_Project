@@ -491,23 +491,29 @@ else:
                 max_gross=1.5,
             )
     
-            tickers_list = list(alpha_preds.keys())
+            # 1. Determine consistent tickers for optimization
+            all_tickers = list(alpha_preds.keys())
     
-            # Expected returns vector
-            mu = optimizer.build_expected_returns(alpha_preds, tickers_list)
+            # 2. Covariance + reduced ticker set
+            Sigma, valid_tickers = optimizer.build_covariance(prices, all_tickers)
     
-            # Covariance matrix
-            Sigma = optimizer.build_covariance(prices, tickers_list)
+            if len(valid_tickers) < 2:
+                st.info("Not enough valid tickers to build a unified portfolio.")
+            else:
+                # 3. Expected returns using same reduced ticker set
+                mu = optimizer.build_expected_returns(alpha_preds, valid_tickers)
     
-            # Solve
-            w = optimizer.optimize(mu, Sigma, long_only=False)
+                # 4. Optimize
+                w = optimizer.optimize(mu, Sigma, long_only=False)
     
-            table = optimizer.build_portfolio_table(w, alpha_preds)
-            st.dataframe(table, use_container_width=True)
+                # 5. Display table
+                table = optimizer.build_portfolio_table(w, alpha_preds)
+                st.dataframe(table, use_container_width=True)
     
         except Exception as e:
             st.error(f"Error constructing unified portfolio: {e}")
     
+        
 
 
 
