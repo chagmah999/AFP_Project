@@ -284,35 +284,46 @@ if run_btn:
                 max_weight=0.10,
             )
 
-            # 1. Expected returns vector from alpha predictions (in return units, not percent)
+            # 1. Expected returns vector from alpha predictions (H-day expected alphas)
             mu = optimizer.build_expected_returns(
                 alpha_preds=alpha_preds,
                 tickers=opt_tickers,
             )
 
-            # 2. Covariance matrix from recent price data
-            Sigma = optimizer.build_covariance(
+            # 2. Covariance matrix and valid ticker subset
+            Sigma, valid_tickers = optimizer.build_covariance(
                 price_data=prices,
                 tickers=opt_tickers,
                 lookback_days=252,
             )
 
-            # 3. Optimize weights
-            weights = optimizer.optimize(mu=mu, Sigma=Sigma)
+            if Sigma is None or Sigma.empty or len(valid_tickers) < 2:
+                st.session_state["optimized_portfolio"] = None
+            else:
+                # Keep only tickers that have both alpha and sufficient history
+                common = [tk for tk in valid_tickers if tk in mu.index]
+                if len(common) < 2:
+                    st.session_state["optimized_portfolio"] = None
+                else:
+                    mu_use = mu.loc[common]
+                    Sigma_use = Sigma.loc[common, common]
 
-            # 4. Pretty table for display
-            port_table = optimizer.build_portfolio_table(
-                weights=weights,
-                alpha_preds=alpha_preds,
-            )
+                    # 3. Optimize weights
+                    weights = optimizer.optimize(mu=mu_use, Sigma=Sigma_use)
 
-            st.session_state["optimized_portfolio"] = port_table
+                    # 4. Pretty table for display
+                    port_table = optimizer.build_portfolio_table(
+                        weights=weights,
+                        alpha_preds=alpha_preds,
+                    )
+                    st.session_state["optimized_portfolio"] = port_table
         else:
             st.session_state["optimized_portfolio"] = None
 
     except Exception as e:
         st.session_state["optimized_portfolio"] = None
         st.warning(f"Error constructing optimized portfolio: {e}")
+
 
 
     # ------------------ Stress Probability ------------------
@@ -482,53 +493,29 @@ else:
     # ------------------ Optimized unified portfolio ------------------
     st.subheader("Optimized unified portfolio")
 
-    if alpha_preds and prices is not None:
-        try:
-            # Use only tickers for which we have alpha predictions and price data
-            all_price_tickers = set(prices["ticker"].unique())
-            universe_tickers = sorted(all_price_tickers & set(alpha_preds.keys()))
-            if len(universe_tickers) < 2:
-                st.info("Not enough overlapping tickers with alpha and prices to build a portfolio.")
-            else:
-                optimizer = UnifiedPortfolioOptimizer(
-                    risk_aversion=50.0,
-                    max_gross=1.5,
-                    max_weight=0.05,
-                )
+    optimized_portfolio = st.session_state.get("optimized_portfolio")
 
-                # Expected returns from alpha predictions
-                mu = optimizer.build_expected_returns(alpha_preds, universe_tickers)
-
-                # Covariance from recent daily returns (e.g. 252 days)
-                Sigma = optimizer.build_covariance(
-                    price_data=prices,
-                    tickers=universe_tickers,
-                    lookback_days=252,
-                )
-
-                if Sigma is None or Sigma.empty:
-                    st.info("Not enough return history to estimate a covariance matrix.")
-                else:
-                    # Long/short optimized portfolio
-                    w = optimizer.optimize(mu, Sigma, long_only=False)
-
-                    table = optimizer.build_portfolio_table(w, alpha_preds)
-                    st.markdown(
-                        "This portfolio combines per-stock alpha forecasts "
-                        "with recent return covariance to produce a single, "
-                        "risk-adjusted long/short portfolio over the universe."
-                    )
-                    st.dataframe(
-                        table.style.format(
-                            {
-                                "weight": "{:.3f}",
-                                "expected_alpha_%": "{:.2f}",
-                            }
-                        ),
-                        use_container_width=True,
-                    )
-        except Exception as e:
-            st.warning(f"Error constructing unified portfolio: {e}")
+    if isinstance(optimized_portfolio, pd.DataFrame) and not optimized_portfolio.empty:
+        st.markdown(
+            "This portfolio combines per-stock alpha forecasts "
+            "with recent return covariance to produce a single, "
+            "risk-adjusted long/short portfolio over the universe."
+        )
+        st.dataframe(
+            optimized_portfolio.style.format(
+                {
+                    "weight": "{:.3f}",
+                    "expected_alpha_%": "{:.2f}",
+                }
+            ),
+            use_container_width=True,
+        )
+    else:
+        st.info(
+            "No unified optimized portfolio is available. "
+            "This can happen if there are too few tickers with both "
+            "alpha predictions and sufficient return history."
+        )
 
     
         
