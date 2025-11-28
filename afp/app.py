@@ -430,6 +430,16 @@ else:
         # 1d. Validation summary: AR(1) vs ensemble
         if factor_eval:
             st.markdown("### Factor signal validation (walk-forward)")
+            st.caption(
+                "This section evaluates how well the forecasting models would have performed historically "
+                "using walk-forward validation. The data is split into several consecutive train-test windows: "
+                "for each window, the models are trained on past data and then tested only on the period that "
+                "comes immediately after it, mimicking real-time forecasting. We report accuracy for two models: "
+                "a simple AR(1) baseline and a three-model machine-learning ensemble (Ridge, Lasso, Random Forest). "
+                "For each, we show the direction hit rate (how often the model correctly predicted the sign of the "
+                "factor’s forward return), as well as RMSE and MAE to measure numerical forecast error. "
+            )
+
 
             eval_rows = []
             for f, s in factor_eval.items():
