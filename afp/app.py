@@ -376,11 +376,14 @@ else:
             st.subheader("Top drivers per factor")
             st.markdown(
                 "The table below shows which macro features the model found most predictive "
-                "when forecasting each factor’s expected return over the next *H* days. "
+                "when forecasting each factor’s expected return over the next *H* days, where *H* is "
+                "the forecast horizon set by the user. "
                 "These macro features include rate levels, term spreads, credit spreads, and volatility measures. "
                 "More technically, 'most predictive' means these features produced the largest reductions "
                 "in forecast error in the random forest model, with RF importance measuring the average "
-                "improvement in fit when that feature is used across the trees.")
+                "improvement in fit when that feature is used across the trees."
+            )
+            
 
         df_drivers = pd.DataFrame(drivers_rows)
         st.dataframe(
