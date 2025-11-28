@@ -607,6 +607,14 @@ else:
 
         # Driver details for each of the top 10 stocks
         st.markdown("Top drivers for each of the top 10 stocks")
+        st.caption(
+            "For each stock, the model predicts its expected *H*-day alpha using a Lasso regression trained on "
+            "historical data. All input features are standardized before estimation, so each coefficient measures "
+            "how a one standard deviation increase in that feature changes the stock’s predicted *H*-day alpha, "
+            "holding other features fixed. A positive coefficient means higher values of the feature are associated "
+            "with higher predicted alpha, and a negative coefficient means the opposite."
+        )
+
         for _, row in df_alpha.head(10).iterrows():
             tk = row["ticker"]
             alpha_val = row["expected_alpha_%"]
