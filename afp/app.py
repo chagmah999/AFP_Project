@@ -481,26 +481,33 @@ else:
 
     # ------------------ Optimized unified portfolio ------------------
     st.subheader("Optimized unified portfolio")
-
-    opt_table = st.session_state.get("optimized_portfolio")
-
-    if isinstance(opt_table, pd.DataFrame) and not opt_table.empty:
-        st.markdown(
-            "This portfolio combines the per-stock alpha forecasts and "
-            "a simple covariance estimate to produce a single, "
-            "Sharpe-style optimized portfolio over the universe."
-        )
-        st.dataframe(
-            opt_table.style.format(
-                {
-                    "weight": "{:.3f}",
-                    "expected_alpha_%": "{:.2f}",
-                }
-            ),
-            use_container_width=True,
-        )
-    else:
-        st.info("Not enough data to construct an optimized portfolio.")
+    
+    if alpha_preds and prices is not None:
+        try:
+            optimizer = UnifiedPortfolioOptimizer(
+                forecast_horizon=forecast_horizon,
+                risk_aversion=50.0,
+                max_weight=0.05,
+                max_gross=1.5,
+            )
+    
+            tickers_list = list(alpha_preds.keys())
+    
+            # Expected returns vector
+            mu = optimizer.build_expected_returns(alpha_preds, tickers_list)
+    
+            # Covariance matrix
+            Sigma = optimizer.build_covariance(prices, tickers_list)
+    
+            # Solve
+            w = optimizer.optimize(mu, Sigma, long_only=False)
+    
+            table = optimizer.build_portfolio_table(w, alpha_preds)
+            st.dataframe(table, use_container_width=True)
+    
+        except Exception as e:
+            st.error(f"Error constructing unified portfolio: {e}")
+    
 
 
 
