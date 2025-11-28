@@ -510,12 +510,31 @@ else:
             ),
             use_container_width=True,
         )
+    
+        # --- New: portfolio-level expected H-day alpha ---
+        try:
+            # expected_alpha_% is in percent, so convert back to decimal
+            # portfolio_alpha_decimal = sum_i w_i * alpha_i
+            portfolio_alpha_decimal = (
+                optimized_portfolio["weight"]
+                * (optimized_portfolio["expected_alpha_%"] / 100.0)
+            ).sum()
+    
+            portfolio_alpha_pct = portfolio_alpha_decimal * 100.0
+    
+            st.markdown(
+                f"**Portfolio expected H-day alpha:** "
+                f"{portfolio_alpha_pct:.2f}%"
+            )
+        except Exception:
+            pass
     else:
         st.info(
             "No unified optimized portfolio is available. "
             "This can happen if there are too few tickers with both "
             "alpha predictions and sufficient return history."
         )
+    
 
     
         
