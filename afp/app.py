@@ -373,7 +373,7 @@ else:
 
         # Driver importance table (still visible, but secondary)
         if drivers_rows:
-            st.markdown("Top drivers per factor")
+            st.subheader("Top drivers per factor")
             st.markdown(
                 "The table below shows which macro features the model found most predictive "
                 "when forecasting each factor’s expected return over the next *H* days. "
