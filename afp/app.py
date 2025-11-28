@@ -341,22 +341,21 @@ else:
     st.subheader("Factor premia forecasts")
 
     if forecasts:
-        # Summary table (ensemble forecast, expressed in percent)
+        # 1. Main view: AR(1) expected premium per factor
         summary_rows = []
         drivers_rows = []
-        
+    
         for f, v in forecasts.items():
-            # Prefer AR(1) forecast; if for some reason it is missing,
-            # fall back to the ensemble so the app does not crash.
-            ar1_fc = v.get("ar1_forecast", v.get("ensemble_forecast"))
-        
+            # Prefer AR(1); if missing for any reason, fall back to ensemble
+            ar1_fc = v.get("ar1_forecast", v.get("ensemble_forecast", 0.0))
+    
             summary_rows.append(
                 {
                     "Factor": f,
                     "Expected Premium % (AR(1))": ar1_fc * 100.0,
                 }
             )
-        
+    
             for d in (v.get("top_drivers") or []):
                 drivers_rows.append(
                     {
@@ -365,11 +364,28 @@ else:
                         "RF Importance": d.get("rf_importance"),
                     }
                 )
-
-
+    
         df_summary = pd.DataFrame(summary_rows).sort_values(
-            "Expected Premium % (ensemble)", ascending=False
+            "Expected Premium % (AR(1))", ascending=False
         )
+        st.dataframe(
+            df_summary.style.format(
+                {"Expected Premium % (AR(1))": "{:.2f}"}
+            ),
+            use_container_width=True,
+        )
+    
+        # Driver importance table (still visible, but secondary)
+        if drivers_rows:
+            st.markdown("Top drivers per factor")
+            df_drivers = pd.DataFrame(drivers_rows)
+            st.dataframe(
+                df_drivers.style.format({"RF Importance": "{:.3f}"}),
+                use_container_width=True,
+            )
+
+  
+
         st.dataframe(
             df_summary.style.format(
                 {"Expected Premium % (ensemble)": "{:.2f}"}
