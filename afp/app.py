@@ -374,13 +374,20 @@ else:
         # Driver importance table (still visible, but secondary)
         if drivers_rows:
             st.markdown("Top drivers per factor")
-            df_drivers = pd.DataFrame(drivers_rows)
-            st.dataframe(
-                df_drivers.style.format(
-                    {"RF Importance": "{:.3f}"}
-                ),
-                use_container_width=True,
-            )
+            st.caption(
+                "The table below shows which macro features the model found most influential "
+                "when forecasting each factor’s expected return over the next H days. "
+                "Model inputs include rate levels, term spreads, credit spreads, and volatility measures. "
+                "More technically, 'most predictive' means these features produced the largest reductions "
+                "in forecast error in the random forest model, with RF importance measuring the average "
+                "improvement in fit when that feature is used across the trees.")
+
+        df_drivers = pd.DataFrame(drivers_rows)
+        st.dataframe(
+            df_drivers.style.format({"RF Importance": "{:.3f}"}),
+            use_container_width=True,
+        )
+
 
         # Validation summary
         # AR(1) metrics shown up front, ensemble metrics tucked inside an expander
