@@ -374,10 +374,10 @@ else:
         # Driver importance table (still visible, but secondary)
         if drivers_rows:
             st.markdown("Top drivers per factor")
-            st.caption(
-                "The table below shows which macro features the model found most influential "
-                "when forecasting each factor’s expected return over the next H days. "
-                "Model inputs include rate levels, term spreads, credit spreads, and volatility measures. "
+            st.markdown(
+                "The table below shows which macro features the model found most predictive "
+                "when forecasting each factor’s expected return over the next *H* days. "
+                "These macro features include rate levels, term spreads, credit spreads, and volatility measures. "
                 "More technically, 'most predictive' means these features produced the largest reductions "
                 "in forecast error in the random forest model, with RF importance measuring the average "
                 "improvement in fit when that feature is used across the trees.")
