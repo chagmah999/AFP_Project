@@ -3,8 +3,6 @@ import requests
 import pandas as pd
 from afp_app.config import FMP_API_KEY
 
-
-# Full hardcoded S&P 500 list (original fallback)
 ALL_SP500 = [
     'A', 'AAL', 'AAPL', 'ABBV', 'ABNB', 'ABT', 'ACGL', 'ACN', 'ADBE', 'ADI',
     'ADM', 'ADP', 'ADSK', 'AEE', 'AEP', 'AES', 'AFL', 'AIG', 'AIZ', 'AJG',
@@ -59,9 +57,7 @@ ALL_SP500 = [
     'WY', 'WYNN', 'XEL', 'XOM', 'XYL', 'YUM', 'ZBH', 'ZBRA', 'ZTS'
 ]
 
-
 def fetch_sp500_from_fmp() -> list[str]:
-    """Fetch live S&P 500 constituents from FMP stable endpoint."""
     if not FMP_API_KEY:
         print("Warning: No FMP API key; cannot fetch live S&P 500.")
         return []
@@ -76,25 +72,19 @@ def fetch_sp500_from_fmp() -> list[str]:
 
         data = resp.json()
 
-        # Extract & clean tickers
         tickers = [
             str(item["symbol"]).upper().replace(".", "-")
             for item in data if "symbol" in item
         ]
 
-        # Remove duplicates just in case
         return list(dict.fromkeys(tickers))
 
     except Exception as e:
         print(f"Warning: FMP S&P 500 fetch failed: {e}")
         return []
 
-
 def get_universe(n: int = 50, randomize: bool = True, seed: int | None = None) -> list[str]:
-    """
-    Returns n tickers from the live S&P 500. 
-    If FMP fails, falls back to the full ALL_SP500 list.
-    """
+ 
     live = fetch_sp500_from_fmp()
     pool = live if live else ALL_SP500
 
