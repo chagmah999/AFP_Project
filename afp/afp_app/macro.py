@@ -4,7 +4,6 @@ import pandas as pd
 from datetime import datetime
 from .config import FMP_API_KEY, FMP_STABLE_BASE, FMP_V4_BASE
 
-
 class MacroDataFetcher:
     def __init__(self, api_key: str = FMP_API_KEY,
                  stable_base: str = FMP_STABLE_BASE,
@@ -23,7 +22,8 @@ class MacroDataFetcher:
     def _to_dt(s: pd.Series) -> pd.Series:
         return pd.to_datetime(s, errors="coerce").dt.tz_localize(None)
 
-    # -------------------- Treasury -------------------- #
+
+
     def fetch_treasury_rates(self, from_date: str = "2022-01-01", to_date: str | None = None) -> pd.DataFrame:
         """
         Fetch U.S. Treasury rates from FMP stable endpoint with robust numeric handling.
@@ -41,11 +41,9 @@ class MacroDataFetcher:
         if "date" not in df.columns:
             return pd.DataFrame()
 
-        # Normalize date and sort
         df["date"] = pd.to_datetime(df["date"])
         df = df.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
 
-        # Column picker to tolerate naming variants seen in FMP payloads
         def pick(frame: pd.DataFrame, candidates: list[str]) -> str | None:
             for c in candidates:
                 if c in frame.columns:
@@ -57,27 +55,25 @@ class MacroDataFetcher:
         c_5y = pick(df, ["year5", "5Y"])
         c_10y = pick(df, ["year10", "10Y"])
 
-        # Coerce available tenor columns to numeric
         num_cols = [c for c in [c_3m, c_2y, c_5y, c_10y] if c is not None]
         if num_cols:
             df[num_cols] = df[num_cols].apply(pd.to_numeric, errors="coerce")
 
-        # Spreads
         if c_10y and c_2y:
             df["term_spread_10y2y"] = df[c_10y] - df[c_2y]
         if c_10y and c_3m:
             df["term_spread_10y3m"] = df[c_10y] - df[c_3m]
 
-        # Rates level features
         levels = [c for c in [c_3m, c_2y, c_5y, c_10y] if c is not None]
         if levels:
-            # Use DataFrame mean over numeric columns, not pd.to_numeric on a 2-D object
+
             df["rates_level"] = df[levels].astype(float).mean(axis=1)
             df["rates_1m_change"] = df["rates_level"].diff(21)
 
         return df
 
-    # -------------------- VIX -------------------- #
+
+
     def fetch_vix(self, from_date: str = "2022-01-01") -> pd.DataFrame:
         url = f"{self.stable_base}/historical-price-eod/full"
         js = self._get(url, {"symbol": "^VIX"})
@@ -98,7 +94,7 @@ class MacroDataFetcher:
         )
         return df[["date", "vix_close", "vix_ma20", "vix_percentile"]].sort_values("date").reset_index(drop=True)
 
-    # -------------------- Credit proxies -------------------- #
+
     def fetch_credit_spreads(self, from_date: str = "2022-01-01") -> pd.DataFrame:
         frames = []
         for sym in ["HYG", "LQD", "TLT"]:
@@ -133,3 +129,4 @@ class MacroDataFetcher:
             wide["credit_spread_1m_change"] = wide["credit_spread_level"].diff(21)
 
         return wide.reset_index()
+
