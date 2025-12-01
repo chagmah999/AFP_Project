@@ -34,13 +34,10 @@ for key, default in [
     ("base_alpha", None),
     ("modeling_frame", None),
     ("forecaster_obj", None),
-    # store universe and factor score info for later display
     ("universe_tickers", None),
     ("factor_portfolio_sizes", None),
     ("sample_factor_scores", None),
-    # store optimized unified portfolio table
     ("optimized_portfolio", None),
-    # store the forecast horizon used when pipeline was last run
     ("portfolio_horizon", None),
 ]:
     if key not in st.session_state:
@@ -107,7 +104,6 @@ if run_btn:
         st.error("Please enter a valid FMP API key.")
         st.stop()
 
-    # Remember the horizon used for this run
     st.session_state["portfolio_horizon"] = int(forecast_horizon)
 
     status.info("Selecting universe...")
@@ -117,7 +113,6 @@ if run_btn:
         seed=int(seed),
     )
 
-    # Store universe for later display instead of showing it first
     st.session_state["universe_tickers"] = tickers
 
     status.info("Fetching fundamentals and prices...")
@@ -140,7 +135,6 @@ if run_btn:
     factor_returns = pd.DataFrame()
     if metrics.empty:
         st.warning("No factor metrics available. Check fundamentals coverage.")
-        # Also clear any old stored portfolio info
         st.session_state["factor_portfolio_sizes"] = None
         st.session_state["sample_factor_scores"] = None
     else:
@@ -157,7 +151,6 @@ if run_btn:
             prices["date"].max().strftime("%Y-%m-%d"),
         )
 
-        # Build latest per ticker scores for later display
         latest = (
             metrics.sort_values("date")
             .groupby("ticker")
@@ -185,7 +178,6 @@ if run_btn:
         else:
             sample = None
 
-        # Store details in session state instead of showing them first
         st.session_state["factor_portfolio_sizes"] = port_sizes
         st.session_state["sample_factor_scores"] = sample
 
@@ -213,12 +205,10 @@ if run_btn:
     factor_eval: dict[str, dict] = {}
 
     for f in factors:
-        # Walk-forward validation (stores ensemble and AR(1) metrics)
         val = forecaster.walk_forward_validation(modeling, f)
         if val is not None:
             factor_eval[f] = forecaster.validation_summary.get(f, {})
 
-        # Forward forecast for next H days
         fc = forecaster.forecast_next(modeling, f)
         if fc:
             fc["top_drivers"] = (fc.get("top_drivers") or [])[:top_k_drivers]
@@ -320,7 +310,6 @@ else:
         drivers_rows = []
 
         for f, v in forecasts.items():
-            # Prefer AR(1); if missing for any reason, fall back to ensemble
             ar1_fc = v.get("ar1_forecast", v.get("ensemble_forecast", 0.0))
 
             summary_rows.append(
@@ -422,7 +411,6 @@ else:
 
             df_eval = pd.DataFrame(eval_rows)
 
-            # AR(1) baseline table (primary)
             st.markdown("**AR(1) baseline performance**")
             df_ar1 = df_eval[
                 ["Factor", "AR(1) Hit Rate", "AR(1) RMSE", "AR(1) MAE"]
