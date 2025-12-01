@@ -228,7 +228,7 @@ if run_btn:
 
     alpha_preds: dict[str, dict] = {}
 
-    for tk in tickers[:cap]:
+    for tk in tickers:
         res = alpha_model.predict_alpha(tk, horizon=forecast_horizon)
         if res:
             if "drivers" in res:
