@@ -1,5 +1,3 @@
-# afp_app/engine.py
-
 from __future__ import annotations
 
 from typing import Dict, Any
@@ -9,50 +7,6 @@ import pandas as pd
 
 
 class MarketMancerEngine:
-    """
-    MarketMancerEngine
-
-    This class takes the model outputs produced by the pipeline
-    and turns them into a simple, human-readable set of
-    "recommendations" for factors and single-name stocks.
-
-    Inputs:
-      - factor_forecasts: dict keyed by factor name
-          Each value is expected to contain at least:
-            {
-              "ensemble_forecast": float,   # H-day expected premium (in decimal form)
-              ... (other fields ignored here)
-            }
-
-      - alpha_preds: dict keyed by ticker
-          Each value is expected to contain at least:
-            {
-              "expected_alpha": float,      # H-day expected idiosyncratic return (decimal)
-              "drivers": {...},             # may include fundamental_score, features, etc.
-            }
-
-      - stress: kept only for backwards compatibility with older versions
-        of the app. It is ignored in this simplified engine.
-
-    Output (via generate()):
-      A dictionary with three sections:
-        {
-          "factors": {
-              "top_overweight": [...],
-              "top_underweight": [...],
-          },
-          "stocks": {
-              "top_longs": [...],
-              "top_shorts": [...],
-          },
-          "meta": {
-              "description": "...",
-          }
-        }
-
-      The exact structure is easy to inspect in the Streamlit app
-      and is deliberately simple so it is easy to explain to sponsors.
-    """
 
     def __init__(
         self,
@@ -67,9 +21,6 @@ class MarketMancerEngine:
         # older code that passed a third argument still runs without error.
         self.stress = None
 
-    # -------------------------------------------------------------
-    # Helper: build factor summary DataFrame
-    # -------------------------------------------------------------
     def _build_factor_df(self) -> pd.DataFrame:
         rows = []
         for name, info in self.factor_forecasts.items():
@@ -92,10 +43,7 @@ class MarketMancerEngine:
         df = pd.DataFrame(rows)
         df = df.sort_values("expected_premium_dec", ascending=False).reset_index(drop=True)
         return df
-
-    # -------------------------------------------------------------
-    # Helper: build alpha summary DataFrame
-    # -------------------------------------------------------------
+        
     def _build_alpha_df(self) -> pd.DataFrame:
         rows = []
         for tk, info in self.alpha_preds.items():
@@ -122,22 +70,9 @@ class MarketMancerEngine:
         df = df.sort_values("expected_alpha_dec", ascending=False).reset_index(drop=True)
         return df
 
-    # -------------------------------------------------------------
-    # Main public method: generate recommendation object
-    # -------------------------------------------------------------
     def generate(self) -> Dict[str, Any]:
-        """
-        Build a simple recommendation dictionary based on:
+     
 
-          - factor forecasts (which factors to overweight / underweight)
-          - single-name alpha forecasts (which stocks to tilt long / short)
-
-        There is deliberately no use of a stress regime or
-        complex scenario logic in this engine. Everything is
-        transparent and directly tied to the model outputs.
-        """
-
-        # ---------- Factor recommendations ----------
         df_factors = self._build_factor_df()
         factor_recs: Dict[str, Any] = {
             "top_overweight": [],
@@ -145,7 +80,6 @@ class MarketMancerEngine:
         }
 
         if not df_factors.empty:
-            # Top 3 positive premia: overweight
             top_over = df_factors.head(3)
             for _, row in top_over.iterrows():
                 if row["expected_premium_dec"] <= 0:
@@ -158,7 +92,6 @@ class MarketMancerEngine:
                     }
                 )
 
-            # Bottom 3 premia (most negative): underweight
             bottom_under = df_factors.sort_values(
                 "expected_premium_dec", ascending=True
             ).head(3)
@@ -173,7 +106,6 @@ class MarketMancerEngine:
                     }
                 )
 
-        # ---------- Stock recommendations ----------
         df_alpha = self._build_alpha_df()
         stock_recs: Dict[str, Any] = {
             "top_longs": [],
@@ -181,7 +113,6 @@ class MarketMancerEngine:
         }
 
         if not df_alpha.empty:
-            # Top 10 positive alphas: candidates for long tilt
             top_longs = df_alpha[df_alpha["expected_alpha_dec"] > 0].head(10)
             for _, row in top_longs.iterrows():
                 stock_recs["top_longs"].append(
@@ -192,7 +123,6 @@ class MarketMancerEngine:
                     }
                 )
 
-            # Top 10 negative alphas: candidates for short / underweight tilt
             top_shorts = (
                 df_alpha[df_alpha["expected_alpha_dec"] < 0]
                 .sort_values("expected_alpha_dec", ascending=True)
@@ -207,7 +137,6 @@ class MarketMancerEngine:
                     }
                 )
 
-        # ---------- Meta info ----------
         meta = {
             "description": (
                 "Recommendations are based solely on factor premia forecasts "
