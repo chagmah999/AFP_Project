@@ -28,9 +28,6 @@ st.set_page_config(page_title="AFP Forecasting Tool", layout="wide")
 st.title("AFP Forecasting Tool")
 st.caption("Factor premia forecasts, stock-level alpha, and unified portfolio optimization")
 
-# -------------------------------------------------------------
-# Session State Initialization
-# -------------------------------------------------------------
 for key, default in [
     ("base_forecasts", None),
     ("base_factor_eval", None),
@@ -49,10 +46,6 @@ for key, default in [
     if key not in st.session_state:
         st.session_state[key] = default
 
-
-# -------------------------------------------------------------
-# Sidebar
-# -------------------------------------------------------------
 with st.sidebar:
     st.subheader("Configuration")
 
@@ -107,9 +100,6 @@ with st.sidebar:
 
 status = st.empty()
 
-# -------------------------------------------------------------
-# Main Pipeline
-# -------------------------------------------------------------
 if run_btn:
     t0 = time.time()
 
@@ -120,7 +110,6 @@ if run_btn:
     # Remember the horizon used for this run
     st.session_state["portfolio_horizon"] = int(forecast_horizon)
 
-    # ------------------ Universe ------------------
     status.info("Selecting universe...")
     tickers = get_universe(
         universe_size,
@@ -131,7 +120,6 @@ if run_btn:
     # Store universe for later display instead of showing it first
     st.session_state["universe_tickers"] = tickers
 
-    # ------------------ Data Collection ------------------
     status.info("Fetching fundamentals and prices...")
     fetcher = FMPDataFetcher(api_key=api_key)
     fundamentals = collect_fundamental_data(tickers, start_date, fetcher)
@@ -146,7 +134,6 @@ if run_btn:
         f"Date range: {prices['date'].min()} to {prices['date'].max()}"
     )
 
-    # ------------------ Factor Metrics & Portfolios ------------------
     status.info("Computing factor scores and factor returns...")
     metrics = calculate_factor_metrics(fundamentals, prices)
 
@@ -202,7 +189,6 @@ if run_btn:
         st.session_state["factor_portfolio_sizes"] = port_sizes
         st.session_state["sample_factor_scores"] = sample
 
-    # ------------------ Macro Data & Modeling Frame ------------------
     status.info("Fetching macro data...")
     m = MacroDataFetcher(api_key=api_key)
     macro = {
@@ -215,7 +201,6 @@ if run_btn:
     modeling = prepare_modeling_data(factor_returns, macro, prices)
     st.session_state["modeling_frame"] = modeling
 
-    # ------------------ Factor Premia Forecasting (core signal) ------------------
     status.info("Forecasting factor premia...")
     forecaster = FactorPremiaForecaster(
         lookback_window=LOOKBACK_DAYS,
@@ -242,7 +227,6 @@ if run_btn:
     st.session_state["base_forecasts"] = forecasts
     st.session_state["base_factor_eval"] = factor_eval
 
-    # ------------------ Alpha Predictions ------------------
     status.info("Predicting per-ticker alpha...")
     alpha_model = AlphaPredictor(
         factor_returns,
@@ -264,11 +248,9 @@ if run_btn:
 
     st.session_state["base_alpha"] = alpha_preds
 
-    # ------------------ Unified Optimized Portfolio (compute only, store in session) ------------------
     status.info("Constructing optimized unified portfolio...")
 
     try:
-        # Use only tickers for which we have alpha predictions
         opt_tickers = [tk for tk in tickers if tk in alpha_preds]
 
         if opt_tickers:
@@ -278,13 +260,11 @@ if run_btn:
                 max_weight=0.10,
             )
 
-            # 1. Expected returns vector from alpha predictions (H-day expected alphas)
             mu = optimizer.build_expected_returns(
                 alpha_preds=alpha_preds,
                 tickers=opt_tickers,
             )
 
-            # 2. Covariance matrix and valid ticker subset
             Sigma, valid_tickers = optimizer.build_covariance(
                 price_data=prices,
                 tickers=opt_tickers,
@@ -294,7 +274,6 @@ if run_btn:
             if Sigma is None or Sigma.empty or len(valid_tickers) < 2:
                 st.session_state["optimized_portfolio"] = None
             else:
-                # Keep only tickers that have both alpha and sufficient history
                 common = [tk for tk in valid_tickers if tk in mu.index]
                 if len(common) < 2:
                     st.session_state["optimized_portfolio"] = None
@@ -302,10 +281,8 @@ if run_btn:
                     mu_use = mu.loc[common]
                     Sigma_use = Sigma.loc[common, common]
 
-                    # 3. Optimize weights
                     weights = optimizer.optimize(mu=mu_use, Sigma=Sigma_use)
 
-                    # 4. Pretty table for display
                     port_table = optimizer.build_portfolio_table(
                         weights=weights,
                         alpha_preds=alpha_preds,
@@ -321,10 +298,6 @@ if run_btn:
     t1 = time.time()
     st.success(f"Pipeline completed in {t1 - t0:.1f} seconds.")
 
-
-# -------------------------------------------------------------
-# Display Section (Persists after running pipeline)
-# -------------------------------------------------------------
 forecasts = st.session_state.get("base_forecasts")
 alpha_preds = st.session_state.get("base_alpha")
 factor_eval = st.session_state.get("base_factor_eval")
@@ -332,9 +305,6 @@ factor_eval = st.session_state.get("base_factor_eval")
 if not forecasts and not alpha_preds:
     st.info("Run the pipeline from the sidebar to generate forecasts.")
 else:
-    # =========================================================
-    # 1. Factor premia forecasts (first, core view)
-    # =========================================================
     st.subheader("Factor premia forecasts")
 
     if forecasts:
@@ -346,7 +316,6 @@ else:
             "overweight), while negative values indicate expected headwinds (candidates to underweight)."
         )
 
-        # 1a. Main view: AR(1) expected premium per factor
         summary_rows = []
         drivers_rows = []
 
@@ -380,7 +349,6 @@ else:
             use_container_width=True,
         )
 
-        # 1b. Optional ensemble view in an expander
         with st.expander(
             "Show machine learning ensemble factor forecasts (Ridge, Lasso, Random Forest)"
         ):
@@ -407,7 +375,6 @@ else:
                 use_container_width=True,
             )
 
-        # 1c. Top drivers per factor
         if drivers_rows:
             st.subheader("Top drivers per factor")
             st.caption(
@@ -426,7 +393,6 @@ else:
                 use_container_width=True,
             )
 
-        # 1d. Validation summary: AR(1) vs ensemble
         if factor_eval:
             st.markdown("### Factor signal validation (walk-forward)")
             st.caption(
@@ -472,7 +438,6 @@ else:
                 use_container_width=True,
             )
 
-            # Ensemble vs AR(1) comparison in an expander
             with st.expander(
                 "Show machine learning ensemble validation metrics (Ridge, Lasso, Random Forest)"
             ):
@@ -492,9 +457,6 @@ else:
     else:
         st.info("No factor forecasts available.")
 
-    # =========================================================
-    # 1.b Universe and factor score details (after premia)
-    # =========================================================
     with st.expander("Show universe and stock-level factor scores (details)"):
         uni = st.session_state.get("universe_tickers")
         port_sizes = st.session_state.get("factor_portfolio_sizes")
@@ -515,7 +477,6 @@ else:
             st.markdown("**Sample stock-level factor scores (0 to 1)**")
             st.dataframe(sample_scores, use_container_width=True)
 
-    # ------------------ Optimized unified portfolio ------------------
     st.subheader("Optimized unified portfolio")
 
     optimized_portfolio = st.session_state.get("optimized_portfolio")
@@ -541,7 +502,6 @@ else:
             use_container_width=True,
         )
 
-        # --- Portfolio-level expected H-day alpha with dynamic H ---
         try:
             portfolio_alpha_decimal = (
                 optimized_portfolio["weight"]
@@ -550,10 +510,8 @@ else:
 
             portfolio_alpha_pct = portfolio_alpha_decimal * 100.0
 
-            # Use the horizon from the last pipeline run if available
             horizon_used = st.session_state.get("portfolio_horizon")
             if horizon_used is None:
-                # Fallback to current slider value if something went wrong
                 horizon_used = int(forecast_horizon)
 
             st.markdown(
@@ -569,9 +527,6 @@ else:
             "alpha predictions and sufficient return history."
         )
 
-    # =========================================================
-    # 2. Alpha predictions
-    # =========================================================
     st.subheader("Alpha predictions (top 10)")
     st.caption(
         "This section lists the 10 stocks with the highest expected *H*-day alpha from a Lasso regression that links "
@@ -595,7 +550,6 @@ else:
             ]
         ).sort_values("expected_alpha_%", ascending=False)
 
-        # Top 10 table
         show_top = df_alpha.head(10)[
             ["ticker", "expected_alpha_%", "fundamental_score"]
         ]
@@ -604,7 +558,6 @@ else:
             use_container_width=True,
         )
 
-        # Alpha signal strength
         try:
             n = len(df_alpha)
             if n >= 30:
@@ -622,7 +575,6 @@ else:
         except Exception:
             pass
 
-        # Driver details for each of the top 10 stocks
         st.markdown("**Top drivers for each of the top 10 stocks**")
         st.caption(
             "For each stock, the model predicts its expected *H*-day alpha using a Lasso regression trained on "
