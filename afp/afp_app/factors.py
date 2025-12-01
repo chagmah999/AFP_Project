@@ -1,9 +1,7 @@
 import numpy as np
 import pandas as pd
 
-
 def _safe_div(num, den):
-    """Safe division that returns NaN if denominator is zero or NaN."""
     num = np.asarray(num, dtype=float)
     den = np.asarray(den, dtype=float)
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -15,17 +13,7 @@ def calculate_factor_metrics(
     fundamentals: dict,
     price_data: pd.DataFrame
 ) -> pd.DataFrame:
-    """
-    Build factor inputs and industry-neutral 0-1 scores for VALUE, QUALITY,
-    MOMENTUM, and LOW_VOL.
-
-    - Uses FMP fundamentals (balance sheet, income statement, cash flow)
-    - Carries through 'sector' / 'industry' if present
-    - Uses outstandingShares from /profile (merged into fundamentals)
-    - Computes B/P, E/P, FCF/P using market cap = price * shares_out
-    - Computes 60d momentum and 60d realized volatility
-    - Normalizes within sector (or industry) using percentile ranks
-    """
+ 
     bs = fundamentals.get("balance_sheet", pd.DataFrame())
     inc = fundamentals.get("income_statement", pd.DataFrame())
     cf = fundamentals.get("cash_flow", pd.DataFrame())
@@ -33,10 +21,6 @@ def calculate_factor_metrics(
     if bs.empty or inc.empty:
         return pd.DataFrame()
 
-    # ---------------- Merge fundamentals ----------------
-    # Columns to keep from balance sheet, including optional sector metadata if present
-    # ---------------- Merge fundamentals ----------------
-    # Columns to keep from balance sheet, including optional sector metadata if present
     bs_cols = [
         "ticker", "date",
         "totalStockholdersEquity",
@@ -46,19 +30,15 @@ def calculate_factor_metrics(
         "cashAndCashEquivalents",
     ]
 
-    # Add shares column only if it actually exists (e.g. merged from profile)
     if "outstandingShares" in bs.columns:
         bs_cols.append("outstandingShares")
 
-    # Carry through sector / industry if present
     for meta_col in ["sector", "industry"]:
         if meta_col in bs.columns:
             bs_cols.append(meta_col)
 
     bs_use = bs[bs_cols].copy()
 
-
-    # Income statement
     inc_cols = [
         "ticker", "date",
         "revenue",
@@ -67,7 +47,7 @@ def calculate_factor_metrics(
         "operatingIncome",
         "eps",
         "ebitda",
-        # some FMP endpoints put share counts here instead
+
         "weightedAverageShsOut",
         "weightedAverageShsOutDil",
     ]
@@ -80,9 +60,6 @@ def calculate_factor_metrics(
         how="inner",
     )
 
-    # Unified shares outstanding:
-    # 1) prefer outstandingShares from /profile
-    # 2) fall back to weightedAverageShsOut / weightedAverageShsOutDil
     share_candidates = [
         "outstandingShares",
         "weightedAverageShsOut",
@@ -95,7 +72,6 @@ def calculate_factor_metrics(
                 pd.to_numeric(metrics[col], errors="coerce")
             )
 
-    # Optional cash flow
     if not cf.empty:
         cf_cols = ["ticker", "date", "freeCashFlow", "operatingCashFlow"]
         cf_use = cf[cf_cols].copy()
@@ -106,12 +82,10 @@ def calculate_factor_metrics(
             how="left",
         )
 
-    # ---------------- Fundamental ratios ----------------
     metrics["book_equity"] = pd.to_numeric(
         metrics["totalStockholdersEquity"], errors="coerce"
     )
 
-    # Build a latest price per ticker so we can get price / market cap
     if not price_data.empty:
         last_price = (
             price_data.sort_values("date")
@@ -122,13 +96,11 @@ def calculate_factor_metrics(
     else:
         metrics["price_last"] = np.nan
 
-    # Market cap = shares_out * last price (if both exist)
     metrics["market_cap"] = _safe_div(
         metrics["shares_out"] * metrics["price_last"],
         1.0,
     )
 
-    # Value building blocks: B/P, E/P, FCF/P (implemented as B/M, E/M, F/M)
     metrics["bp_ratio"] = _safe_div(
         metrics["book_equity"],
         metrics["market_cap"],
@@ -142,7 +114,6 @@ def calculate_factor_metrics(
         metrics["market_cap"],
     )
 
-    # Profitability / quality style ratios
     metrics["roe"] = _safe_div(
         metrics["netIncome"],
         metrics["totalStockholdersEquity"],
@@ -164,7 +135,6 @@ def calculate_factor_metrics(
         metrics["totalStockholdersEquity"],
     )
 
-    # ---------------- Momentum and volatility from price data ----------------
     if price_data.empty:
         metrics = metrics.replace([np.inf, -np.inf], np.nan)
         return metrics
@@ -175,14 +145,12 @@ def calculate_factor_metrics(
         values="adjClose",
     )
 
-    # 60-day momentum: simple percentage change over 60 trading days
     mom_60d = px_pivot.pct_change(60)
     if not mom_60d.empty:
         last_mom = mom_60d.iloc[-1]
         for tk in last_mom.index:
             metrics.loc[metrics["ticker"] == tk, "momentum_60d"] = last_mom[tk]
 
-    # 60-day realized volatility from daily returns
     vol_60d = (
         price_data
         .sort_values(["ticker", "date"])
@@ -195,19 +163,16 @@ def calculate_factor_metrics(
     for tk in vol_60d.index:
         metrics.loc[metrics["ticker"] == tk, "volatility_60d"] = vol_60d[tk]
 
-    # ---------------- Cross-sectional 0-1 scores (industry-neutral) ----------------
-    # Grouping level: sector if available, else industry, else whole universe
     if "sector" in metrics.columns:
         group_cols = ["sector"]
     elif "industry" in metrics.columns:
         group_cols = ["industry"]
     else:
-        group_cols = []  # all names together
+        group_cols = []  
 
     def _rank_pct(series: pd.Series, ascending: bool = True) -> pd.Series:
         return series.rank(method="average", pct=True, ascending=ascending)
 
-    # Helper to apply groupwise rank or global rank if no group_cols
     def _group_rank(col_name: str, ascending: bool = True) -> pd.Series:
         if group_cols:
             return (
@@ -217,7 +182,6 @@ def calculate_factor_metrics(
         else:
             return _rank_pct(metrics[col_name], ascending=ascending)
 
-    # ---------------- VALUE factor from z-scores of B/P, E/P, FCF/P ----------------
     def _zscore_grouped(series: pd.Series) -> pd.Series:
         mu = series.mean()
         sigma = series.std(ddof=0)
@@ -248,12 +212,9 @@ def calculate_factor_metrics(
         )
         value_components.append("z_fcfp")
 
-    # Raw value signal = average of z-scores of B/P, E/P, FCF/P
     if value_components:
         metrics["value_raw"] = metrics[value_components].mean(axis=1, skipna=True)
 
-        # Map raw value signal to 0–1 percentile within industry/sector
-        # Higher value_raw (cheaper stocks) should get higher score
         if group_cols:
             metrics["value_score"] = (
                 metrics.groupby(group_cols)["value_raw"]
@@ -264,7 +225,6 @@ def calculate_factor_metrics(
                 metrics["value_raw"], ascending=False
             )
 
-    # QUALITY: average of ROE, ROA, margins, inverse leverage
     quality_components = []
 
     if "roe" in metrics.columns:
@@ -284,7 +244,7 @@ def calculate_factor_metrics(
         quality_components.append("q_fcfm")
 
     if "debt_to_equity" in metrics.columns:
-        # Lower leverage is better, so 1 - percentile of debt_to_equity
+
         if group_cols:
             lev_rank = (
                 metrics.groupby(group_cols)["debt_to_equity"]
@@ -298,7 +258,6 @@ def calculate_factor_metrics(
     if quality_components:
         metrics["quality_score"] = metrics[quality_components].mean(axis=1)
 
-    # LOW VOL: low volatility should have high score
     if "volatility_60d" in metrics.columns:
         if group_cols:
             vol_rank = (
@@ -309,13 +268,11 @@ def calculate_factor_metrics(
             vol_rank = _rank_pct(metrics["volatility_60d"], ascending=True)
         metrics["lowvol_score"] = 1.0 - vol_rank
 
-    # MOMENTUM: percentile of 60d momentum within group
     if "momentum_60d" in metrics.columns:
         metrics["momentum_score"] = _group_rank("momentum_60d", ascending=True)
 
     metrics = metrics.replace([np.inf, -np.inf], np.nan)
     return metrics
-
 
 class FactorPortfolioConstructor:
     """
@@ -334,19 +291,10 @@ class FactorPortfolioConstructor:
         ascending: bool,
         percentile: float = 0.3,
     ) -> pd.DataFrame:
-        """
-        Build a single factor portfolio from a given score column.
-
-        - metric_column is expected to be a 0-1 score where higher is "more of" the factor.
-        - We take top (1 - percentile) as the long leg and bottom percentile as the short leg.
-        - ascending flag keeps the old API but is interpreted as:
-            ascending = False: long = high scores, short = low scores (typical)
-            ascending = True:  long = low scores,  short = high scores
-        """
+       
         if self.metrics.empty or metric_column not in self.metrics.columns:
             return pd.DataFrame()
 
-        # Use the latest metrics for each ticker
         latest = (
             self.metrics.sort_values("date")
             .groupby("ticker")
@@ -361,11 +309,11 @@ class FactorPortfolioConstructor:
         high = valid.quantile(1 - percentile)
 
         if ascending:
-            # For a metric where "low" means more of the factor
+
             long_tk = valid[valid <= low].index.tolist()
             short_tk = valid[valid >= high].index.tolist()
         else:
-            # For a metric where "high" means more of the factor
+
             long_tk = valid[valid >= high].index.tolist()
             short_tk = valid[valid <= low].index.tolist()
 
@@ -384,12 +332,9 @@ class FactorPortfolioConstructor:
         return port
 
     def construct_all(self) -> dict[str, pd.DataFrame]:
-        """
-        Construct portfolios for all four factors using the 0-1 scores.
-        """
+     
         ports: dict[str, pd.DataFrame] = {}
 
-        # Value: high value_score
         if "value_score" in self.metrics.columns:
             ports["VALUE"] = self.construct_factor_portfolio(
                 "VALUE", "value_score", ascending=False
@@ -397,7 +342,6 @@ class FactorPortfolioConstructor:
         else:
             ports["VALUE"] = pd.DataFrame()
 
-        # Quality: high quality_score
         if "quality_score" in self.metrics.columns:
             ports["QUALITY"] = self.construct_factor_portfolio(
                 "QUALITY", "quality_score", ascending=False
@@ -405,7 +349,6 @@ class FactorPortfolioConstructor:
         else:
             ports["QUALITY"] = pd.DataFrame()
 
-        # Momentum: high momentum_score
         if "momentum_score" in self.metrics.columns:
             ports["MOMENTUM"] = self.construct_factor_portfolio(
                 "MOMENTUM", "momentum_score", ascending=False
@@ -413,7 +356,6 @@ class FactorPortfolioConstructor:
         else:
             ports["MOMENTUM"] = pd.DataFrame()
 
-        # Low volatility: high lowvol_score means lower risk
         if "lowvol_score" in self.metrics.columns:
             ports["LOW_VOL"] = self.construct_factor_portfolio(
                 "LOW_VOL", "lowvol_score", ascending=False
@@ -429,9 +371,7 @@ class FactorPortfolioConstructor:
         start_date: str,
         end_date: str,
     ) -> pd.DataFrame:
-        """
-        Compute daily long-short factor returns from the constructed portfolios.
-        """
+       
         rets = []
 
         for fname, port in self.portfolios.items():
