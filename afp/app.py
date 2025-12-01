@@ -253,7 +253,6 @@ if run_btn:
     )
 
     alpha_preds: dict[str, dict] = {}
-    cap = min(100, len(tickers))
 
     for tk in tickers[:cap]:
         res = alpha_model.predict_alpha(tk, horizon=forecast_horizon)
