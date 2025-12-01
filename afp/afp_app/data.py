@@ -17,7 +17,6 @@ def collect_fundamental_data(tickers, start_date, fetcher):
         inc = fetcher.get_income_statement(tk)
         cf = fetcher.get_cash_flow(tk)
 
-        # Fetch metadata (sector, industry)
         prof = fetcher.get_profile(tk)
         if prof:
             profile_rows.append(prof)
@@ -35,19 +34,16 @@ def collect_fundamental_data(tickers, start_date, fetcher):
                 row["ticker"] = tk
                 cf_rows.append(row)
 
-    # Convert to DataFrames
     bs_df = pd.DataFrame(bs_rows)
     inc_df = pd.DataFrame(inc_rows)
     cf_df = pd.DataFrame(cf_rows)
     profile_df = pd.DataFrame(profile_rows)
 
-    # Merge sector/industry into each fundamental table
     if not profile_df.empty:
         bs_df = bs_df.merge(profile_df, on="ticker", how="left")
         inc_df = inc_df.merge(profile_df, on="ticker", how="left")
         cf_df = cf_df.merge(profile_df, on="ticker", how="left")
 
-        # Ensure date columns are proper datetimes
     for df in (bs_df, inc_df, cf_df):
         if "date" in df.columns:
             df["date"] = pd.to_datetime(df["date"], errors="coerce")
@@ -85,7 +81,6 @@ def collect_price_data(
             if not isinstance(px, pd.DataFrame) or px.empty:
                 continue
 
-            # Ensure required columns are present
             if "adjClose" not in px.columns:
                 # If get_price_history was changed to return a different column, handle gracefully
                 if "close" in px.columns:
@@ -93,20 +88,16 @@ def collect_price_data(
                 else:
                     continue
 
-            # Attach ticker
             px = px.copy()
             px["ticker"] = t
 
-            # Ensure date is datetime and sorted
             if "date" in px.columns:
                 px["date"] = pd.to_datetime(px["date"])
                 px = px.sort_values("date")
 
-            # Compute returns and log_returns
             s = pd.to_numeric(px["adjClose"], errors="coerce")
             px["returns"] = s.pct_change()
 
-            # Guard against non positive ratios before log
             ratio = s.div(s.shift(1))
             ratio = ratio.clip(lower=1e-12)
             px["log_returns"] = np.log(ratio)
@@ -116,7 +107,6 @@ def collect_price_data(
         except Exception as e:
             print(f"[warn] prices {t}: {e}")
 
-        # Small pause to be gentle with the API
         if i % 5 == 0:
             time.sleep(0.1)
 
