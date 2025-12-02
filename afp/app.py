@@ -170,11 +170,8 @@ if run_btn:
         ]
 
         if score_cols:
-            sample = (
-                latest[["ticker"] + score_cols]
-                .sort_values("ticker")
-                .head(30)
-            )
+            sample = latest[["ticker"] + score_cols].sort_values("ticker")
+
         else:
             sample = None
 
@@ -462,7 +459,7 @@ else:
             st.json(port_sizes)
 
         if isinstance(sample_scores, pd.DataFrame) and not sample_scores.empty:
-            st.markdown("**Sample stock-level factor scores (0 to 1)**")
+            st.markdown("**Stock-level, sector-adjusted factor scores (0-1 scale)**")
             st.dataframe(sample_scores, use_container_width=True)
 
     st.subheader("Optimized unified portfolio")
