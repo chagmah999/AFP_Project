@@ -13,14 +13,30 @@ def calculate_factor_metrics(
     fundamentals: dict,
     price_data: pd.DataFrame
 ) -> pd.DataFrame:
+    """
+    Build cross-sectional factor building blocks (Value, Quality, Momentum, Low Vol)
+    for ALL tickers present in `fundamentals` and `price_data`.
+
+    Key design choice for S&P 500 wide sector-neutral scores:
+      - We take the *latest available* balance sheet, income statement, and cash flow
+        for each ticker (per table), and merge them on 'ticker' only.
+      - Sector / industry groupings are taken from the fundamentals (via profile).
+      - Percentile ranks and z-scores are then computed *within each sector (or
+        industry)* across this full cross-section, not just within the smaller
+        universe U chosen later in app.py.
+    """
 
     bs = fundamentals.get("balance_sheet", pd.DataFrame())
     inc = fundamentals.get("income_statement", pd.DataFrame())
     cf = fundamentals.get("cash_flow", pd.DataFrame())
 
+    # If we have no balance sheet or income data at all, we cannot build factors
     if bs.empty or inc.empty:
         return pd.DataFrame()
 
+    # -----------------------------
+    # 1. Select columns and build latest snapshot per ticker
+    # -----------------------------
     bs_cols = [
         "ticker", "date",
         "totalStockholdersEquity",
@@ -33,11 +49,20 @@ def calculate_factor_metrics(
     if "outstandingShares" in bs.columns:
         bs_cols.append("outstandingShares")
 
+    # Carry sector / industry from profile into BS
     for meta_col in ["sector", "industry"]:
         if meta_col in bs.columns:
             bs_cols.append(meta_col)
 
     bs_use = bs[bs_cols].copy()
+
+    # Latest BS per ticker
+    bs_latest = (
+        bs_use.sort_values("date")
+        .groupby("ticker")
+        .last()
+        .reset_index()
+    )
 
     inc_cols = [
         "ticker", "date",
@@ -52,13 +77,68 @@ def calculate_factor_metrics(
     ]
     inc_use = inc[inc_cols].copy()
 
+    # Latest INC per ticker
+    inc_latest = (
+        inc_use.sort_values("date")
+        .groupby("ticker")
+        .last()
+        .reset_index()
+    )
+    # We only keep the BS "date" as the snapshot date for the merged metrics;
+    # drop the income-statement "date" to avoid duplicate column names.
+    inc_latest = inc_latest.drop(columns=["date"], errors="ignore")
+
+    # Cash flow is optional
+    if not cf.empty:
+        cf_cols = ["ticker", "date", "freeCashFlow", "operatingCashFlow"]
+        cf_use = cf[cf_cols].copy()
+
+        cf_latest = (
+            cf_use.sort_values("date")
+            .groupby("ticker")
+            .last()
+            .reset_index()
+        )
+        cf_latest = cf_latest.drop(columns=["date"], errors="ignore")
+    else:
+        cf_latest = pd.DataFrame()
+
+    # Merge BS and INC on ticker (not date); keep BS date as the snapshot date
     metrics = pd.merge(
-        bs_use,
-        inc_use,
-        on=["ticker", "date"],
+        bs_latest,
+        inc_latest,
+        on="ticker",
         how="inner",
     )
 
+    # Merge CF if available
+    if not cf_latest.empty:
+        metrics = pd.merge(
+            metrics,
+            cf_latest,
+            on="ticker",
+            how="left",
+        )
+
+    # -----------------------------
+    # 2. Basic accounting ratios and market cap
+    # -----------------------------
+    metrics["book_equity"] = pd.to_numeric(
+        metrics["totalStockholdersEquity"], errors="coerce"
+    )
+
+    if not price_data.empty:
+        # Use full price_data (should be S&P 500 wide when called from app.py)
+        last_price = (
+            price_data.sort_values("date")
+            .groupby("ticker")["adjClose"]
+            .last()
+        )
+        metrics["price_last"] = metrics["ticker"].map(last_price)
+    else:
+        metrics["price_last"] = np.nan
+
+    # Shares out: use any of the available share count fields, in a reasonable order
     share_candidates = [
         "outstandingShares",
         "weightedAverageShsOut",
@@ -71,35 +151,13 @@ def calculate_factor_metrics(
                 pd.to_numeric(metrics[col], errors="coerce")
             )
 
-    if not cf.empty:
-        cf_cols = ["ticker", "date", "freeCashFlow", "operatingCashFlow"]
-        cf_use = cf[cf_cols].copy()
-        metrics = pd.merge(
-            metrics,
-            cf_use,
-            on=["ticker", "date"],
-            how="left",
-        )
-
-    metrics["book_equity"] = pd.to_numeric(
-        metrics["totalStockholdersEquity"], errors="coerce"
-    )
-
-    if not price_data.empty:
-        last_price = (
-            price_data.sort_values("date")
-            .groupby("ticker")["adjClose"]
-            .last()
-        )
-        metrics["price_last"] = metrics["ticker"].map(last_price)
-    else:
-        metrics["price_last"] = np.nan
-
+    # Market cap
     metrics["market_cap"] = _safe_div(
         metrics["shares_out"] * metrics["price_last"],
         1.0,
     )
 
+    # Value style ratios
     metrics["bp_ratio"] = _safe_div(
         metrics["book_equity"],
         metrics["market_cap"],
@@ -113,6 +171,7 @@ def calculate_factor_metrics(
         metrics["market_cap"],
     )
 
+    # Quality style metrics
     metrics["roe"] = _safe_div(
         metrics["netIncome"],
         metrics["totalStockholdersEquity"],
@@ -134,22 +193,28 @@ def calculate_factor_metrics(
         metrics["totalStockholdersEquity"],
     )
 
+    # If we have no prices, just return these accounting metrics
     if price_data.empty:
         metrics = metrics.replace([np.inf, -np.inf], np.nan)
         return metrics
 
+    # -----------------------------
+    # 3. Price-based momentum and volatility (full cross-section)
+    # -----------------------------
     px_pivot = price_data.pivot_table(
         index="date",
         columns="ticker",
         values="adjClose",
     )
 
+    # 60-day momentum as total percent change over last 60 days
     mom_60d = px_pivot.pct_change(60)
     if not mom_60d.empty:
         last_mom = mom_60d.iloc[-1]
         for tk in last_mom.index:
             metrics.loc[metrics["ticker"] == tk, "momentum_60d"] = last_mom[tk]
 
+    # 60-day realized volatility (rolling std of daily returns)
     vol_60d = (
         price_data
         .sort_values(["ticker", "date"])
@@ -162,13 +227,15 @@ def calculate_factor_metrics(
     for tk in vol_60d.index:
         metrics.loc[metrics["ticker"] == tk, "volatility_60d"] = vol_60d[tk]
 
-    # Grouping variable for sector or industry neutralization
+    # -----------------------------
+    # 4. Sector / industry grouping for S&P-wide percentiles
+    # -----------------------------
     if "sector" in metrics.columns:
         group_cols = ["sector"]
     elif "industry" in metrics.columns:
         group_cols = ["industry"]
     else:
-        group_cols = []
+        group_cols = []  # fall back to global ranking if no labels
 
     def _rank_pct(series: pd.Series, ascending: bool = True) -> pd.Series:
         return series.rank(method="average", pct=True, ascending=ascending)
@@ -189,14 +256,15 @@ def calculate_factor_metrics(
             return pd.Series(index=series.index, data=np.nan)
         return (series - mu) / sigma
 
-    # VALUE
-    value_components = []
+    # -----------------------------
+    # 5. VALUE factor: z-score components, then percentile vs sector peers
+    # -----------------------------
+    value_components: list[str] = []
 
     if "bp_ratio" in metrics.columns:
         metrics["z_bp"] = (
             metrics.groupby(group_cols)["bp_ratio"]
             .transform(_zscore_grouped)
-            if group_cols else _zscore_grouped(metrics["bp_ratio"])
         )
         value_components.append("z_bp")
 
@@ -204,7 +272,6 @@ def calculate_factor_metrics(
         metrics["z_ep"] = (
             metrics.groupby(group_cols)["ep_ratio"]
             .transform(_zscore_grouped)
-            if group_cols else _zscore_grouped(metrics["ep_ratio"])
         )
         value_components.append("z_ep")
 
@@ -212,7 +279,6 @@ def calculate_factor_metrics(
         metrics["z_fcfp"] = (
             metrics.groupby(group_cols)["fcfp_ratio"]
             .transform(_zscore_grouped)
-            if group_cols else _zscore_grouped(metrics["fcfp_ratio"])
         )
         value_components.append("z_fcfp")
 
@@ -229,8 +295,10 @@ def calculate_factor_metrics(
                 metrics["value_raw"], ascending=False
             )
 
-    # QUALITY
-    quality_components = []
+    # -----------------------------
+    # 6. QUALITY factor: percentile ranks within sector peers
+    # -----------------------------
+    quality_components: list[str] = []
 
     if "roe" in metrics.columns:
         metrics["q_roe"] = _group_rank("roe", ascending=True)
@@ -262,7 +330,9 @@ def calculate_factor_metrics(
     if quality_components:
         metrics["quality_score"] = metrics[quality_components].mean(axis=1)
 
-    # LOW VOL
+    # -----------------------------
+    # 7. LOW VOL factor: low volatility within sector peers
+    # -----------------------------
     if "volatility_60d" in metrics.columns:
         if group_cols:
             vol_rank = (
@@ -273,35 +343,14 @@ def calculate_factor_metrics(
             vol_rank = _rank_pct(metrics["volatility_60d"], ascending=True)
         metrics["lowvol_score"] = 1.0 - vol_rank
 
-    # MOMENTUM
+    # -----------------------------
+    # 8. MOMENTUM factor: momentum within sector peers
+    # -----------------------------
     if "momentum_60d" in metrics.columns:
         metrics["momentum_score"] = _group_rank("momentum_60d", ascending=True)
 
+    # Clean up infinities
     metrics = metrics.replace([np.inf, -np.inf], np.nan)
-
-    # Attach peer counts so you can see effective group sizes in the app
-    # We use the latest observation per ticker so each ticker has one sector or industry
-    latest = (
-        metrics.sort_values("date")
-        .groupby("ticker")
-        .last()
-        .reset_index()
-    )
-
-    if "sector" in latest.columns:
-        sector_counts = latest.groupby("sector")["ticker"].nunique()
-        metrics = metrics.merge(
-            sector_counts.rename("sector_peer_count"),
-            on="sector",
-            how="left",
-        )
-    elif "industry" in latest.columns:
-        industry_counts = latest.groupby("industry")["ticker"].nunique()
-        metrics = metrics.merge(
-            industry_counts.rename("industry_peer_count"),
-            on="industry",
-            how="left",
-        )
 
     return metrics
 
