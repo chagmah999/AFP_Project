@@ -30,7 +30,7 @@ def get_sp500_tickers_from_fmp(api_key: str) -> list[str]:
 
     Returns a list of ticker symbols.
     """
-    url = f"https://financialmodelingprep.com/stable/sp500_constituent?apikey={api_key}"
+    url = f"https://financialmodelingprep.com/stable/sp500-constituent?apikey={api_key}"
     resp = requests.get(url, timeout=15)
     resp.raise_for_status()
     data = resp.json()
