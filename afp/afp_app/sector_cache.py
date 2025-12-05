@@ -1,9 +1,16 @@
 """
 sector_cache.py
 
-Daily caching system for S&P 500 factor scores.
-Computes and stores factor metrics for all S&P 500 constituents once per day,
-enabling sector-relative percentile calculations for any subset of stocks.
+Hybrid caching system for S&P 500 factor scores.
+
+This module maintains two separate caches:
+1. Fundamentals cache (profiles, balance sheet, income statement, cash flow)
+   - Refreshed MONTHLY (these change quarterly at most)
+2. Prices cache (price history for momentum/volatility)
+   - Refreshed WEEKLY (or daily if API limits allow)
+
+This hybrid approach minimizes API calls while keeping time-sensitive
+data (momentum, volatility) reasonably fresh.
 """
 
 from __future__ import annotations
@@ -11,10 +18,9 @@ from __future__ import annotations
 import os
 import json
 import time
-import hashlib
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Callable
 
 import numpy as np
 import pandas as pd
@@ -29,24 +35,28 @@ from .universe import fetch_sp500_from_fmp, ALL_SP500
 # =============================================================================
 
 CACHE_DIR = os.getenv("SP500_CACHE_DIR", "./cache")
-CACHE_FILENAME = "sp500_factor_scores.parquet"
+
+# Cache filenames
+FUNDAMENTALS_CACHE_FILENAME = "sp500_fundamentals.parquet"
+PRICES_CACHE_FILENAME = "sp500_prices.parquet"
 CACHE_METADATA_FILENAME = "sp500_cache_metadata.json"
 
-# Cache is considered stale after this hour (in local time)
-# e.g., 6 means refresh if it's after 6 AM and cache is from yesterday
-CACHE_REFRESH_HOUR = 6
+# Refresh frequencies (in days)
+# Change PRICES_REFRESH_DAYS to 1 for daily refresh if API limits allow
+FUNDAMENTALS_REFRESH_DAYS = 30  # Monthly
+PRICES_REFRESH_DAYS = 7         # Weekly (change to 1 for daily)
 
-# Minimum number of trading days of price history required
+# Minimum data requirements
 MIN_PRICE_HISTORY_DAYS = 60
 
 # Rate limiting for API calls
 API_CALL_DELAY = 0.1  # seconds between API calls
-BATCH_SIZE = 10  # Number of tickers to process before a longer pause
-BATCH_DELAY = 1.0  # seconds to pause after each batch
+BATCH_SIZE = 10       # Number of tickers to process before a longer pause
+BATCH_DELAY = 1.0     # seconds to pause after each batch
 
 
 # =============================================================================
-# Cache Management
+# Cache Path Helpers
 # =============================================================================
 
 def _get_cache_dir() -> Path:
@@ -56,9 +66,14 @@ def _get_cache_dir() -> Path:
     return cache_path
 
 
-def _get_cache_file_path() -> Path:
-    """Get the path to the main cache file."""
-    return _get_cache_dir() / CACHE_FILENAME
+def _get_fundamentals_cache_path() -> Path:
+    """Get the path to the fundamentals cache file."""
+    return _get_cache_dir() / FUNDAMENTALS_CACHE_FILENAME
+
+
+def _get_prices_cache_path() -> Path:
+    """Get the path to the prices cache file."""
+    return _get_cache_dir() / PRICES_CACHE_FILENAME
 
 
 def _get_metadata_file_path() -> Path:
@@ -66,8 +81,12 @@ def _get_metadata_file_path() -> Path:
     return _get_cache_dir() / CACHE_METADATA_FILENAME
 
 
+# =============================================================================
+# Metadata Management
+# =============================================================================
+
 def _load_cache_metadata() -> dict:
-    """Load cache metadata (last update time, ticker count, etc.)."""
+    """Load cache metadata (last update times, ticker counts, etc.)."""
     meta_path = _get_metadata_file_path()
     if not meta_path.exists():
         return {}
@@ -86,114 +105,183 @@ def _save_cache_metadata(metadata: dict) -> None:
         json.dump(metadata, f, indent=2, default=str)
 
 
-def _is_cache_stale() -> bool:
-    """
-    Check if the cache needs to be refreshed.
+def _update_metadata(cache_type: str, ticker_count: int, extra_info: dict = None) -> None:
+    """Update metadata for a specific cache type."""
+    metadata = _load_cache_metadata()
     
-    Cache is considered stale if:
-    1. Cache file doesn't exist
-    2. Cache was created before today's refresh hour
-    3. Cache metadata is missing or corrupted
-    """
-    cache_path = _get_cache_file_path()
+    metadata[f"{cache_type}_last_updated"] = datetime.now().isoformat()
+    metadata[f"{cache_type}_ticker_count"] = ticker_count
+    
+    if extra_info:
+        for key, value in extra_info.items():
+            metadata[f"{cache_type}_{key}"] = value
+    
+    _save_cache_metadata(metadata)
+
+
+# =============================================================================
+# Staleness Checks
+# =============================================================================
+
+def _is_fundamentals_stale() -> bool:
+    """Check if the fundamentals cache needs to be refreshed."""
+    cache_path = _get_fundamentals_cache_path()
     
     if not cache_path.exists():
-        print("[sector_cache] Cache file does not exist")
+        print("[sector_cache] Fundamentals cache does not exist")
         return True
     
     metadata = _load_cache_metadata()
-    if not metadata or "last_updated" not in metadata:
-        print("[sector_cache] Cache metadata missing or corrupted")
+    last_updated_str = metadata.get("fundamentals_last_updated")
+    
+    if not last_updated_str:
+        print("[sector_cache] Fundamentals cache metadata missing")
         return True
     
     try:
-        last_updated = datetime.fromisoformat(metadata["last_updated"])
+        last_updated = datetime.fromisoformat(last_updated_str)
     except (ValueError, TypeError):
-        print("[sector_cache] Invalid last_updated timestamp in metadata")
+        print("[sector_cache] Invalid fundamentals timestamp in metadata")
         return True
     
-    now = datetime.now()
-    today_refresh_time = now.replace(
-        hour=CACHE_REFRESH_HOUR, minute=0, second=0, microsecond=0
-    )
+    age_days = (datetime.now() - last_updated).days
+    is_stale = age_days >= FUNDAMENTALS_REFRESH_DAYS
     
-    # If it's past refresh hour today and cache is from before that time
-    if now >= today_refresh_time and last_updated < today_refresh_time:
-        print(f"[sector_cache] Cache is stale (last updated: {last_updated})")
-        return True
+    if is_stale:
+        print(f"[sector_cache] Fundamentals cache is stale ({age_days} days old, limit is {FUNDAMENTALS_REFRESH_DAYS})")
+    else:
+        print(f"[sector_cache] Fundamentals cache is fresh ({age_days} days old)")
     
-    # If cache is from a previous day entirely
-    if last_updated.date() < now.date() and now.hour >= CACHE_REFRESH_HOUR:
-        print(f"[sector_cache] Cache is from a previous day (last updated: {last_updated})")
-        return True
-    
-    print(f"[sector_cache] Cache is fresh (last updated: {last_updated})")
-    return False
+    return is_stale
 
 
-def _load_cache() -> Optional[pd.DataFrame]:
-    """Load the cached S&P 500 factor scores."""
-    cache_path = _get_cache_file_path()
+def _is_prices_stale() -> bool:
+    """Check if the prices cache needs to be refreshed."""
+    cache_path = _get_prices_cache_path()
+    
+    if not cache_path.exists():
+        print("[sector_cache] Prices cache does not exist")
+        return True
+    
+    metadata = _load_cache_metadata()
+    last_updated_str = metadata.get("prices_last_updated")
+    
+    if not last_updated_str:
+        print("[sector_cache] Prices cache metadata missing")
+        return True
+    
+    try:
+        last_updated = datetime.fromisoformat(last_updated_str)
+    except (ValueError, TypeError):
+        print("[sector_cache] Invalid prices timestamp in metadata")
+        return True
+    
+    age_days = (datetime.now() - last_updated).days
+    is_stale = age_days >= PRICES_REFRESH_DAYS
+    
+    if is_stale:
+        print(f"[sector_cache] Prices cache is stale ({age_days} days old, limit is {PRICES_REFRESH_DAYS})")
+    else:
+        print(f"[sector_cache] Prices cache is fresh ({age_days} days old)")
+    
+    return is_stale
+
+
+# =============================================================================
+# Cache Loading
+# =============================================================================
+
+def _load_fundamentals_cache() -> Optional[pd.DataFrame]:
+    """Load the cached fundamentals data."""
+    cache_path = _get_fundamentals_cache_path()
     
     if not cache_path.exists():
         return None
     
     try:
         df = pd.read_parquet(cache_path)
-        print(f"[sector_cache] Loaded {len(df)} stocks from cache")
+        print(f"[sector_cache] Loaded fundamentals for {len(df)} stocks from cache")
         return df
     except Exception as e:
-        print(f"[sector_cache] Error loading cache: {e}")
+        print(f"[sector_cache] Error loading fundamentals cache: {e}")
         return None
 
 
-def _save_cache(df: pd.DataFrame) -> bool:
-    """Save the S&P 500 factor scores to cache."""
-    cache_path = _get_cache_file_path()
+def _load_prices_cache() -> Optional[pd.DataFrame]:
+    """Load the cached prices data."""
+    cache_path = _get_prices_cache_path()
+    
+    if not cache_path.exists():
+        return None
+    
+    try:
+        df = pd.read_parquet(cache_path)
+        print(f"[sector_cache] Loaded prices for {df['ticker'].nunique()} stocks from cache")
+        return df
+    except Exception as e:
+        print(f"[sector_cache] Error loading prices cache: {e}")
+        return None
+
+
+# =============================================================================
+# Cache Saving
+# =============================================================================
+
+def _save_fundamentals_cache(df: pd.DataFrame, sectors: list = None) -> bool:
+    """Save the fundamentals data to cache."""
+    cache_path = _get_fundamentals_cache_path()
     
     try:
         df.to_parquet(cache_path, index=False)
-        
-        # Save metadata
-        metadata = {
-            "last_updated": datetime.now().isoformat(),
-            "ticker_count": len(df),
-            "sectors": df["sector"].dropna().unique().tolist() if "sector" in df.columns else [],
-            "columns": df.columns.tolist(),
-        }
-        _save_cache_metadata(metadata)
-        
-        print(f"[sector_cache] Saved {len(df)} stocks to cache")
+        _update_metadata(
+            "fundamentals",
+            len(df),
+            {"sectors": sectors or []}
+        )
+        print(f"[sector_cache] Saved fundamentals for {len(df)} stocks to cache")
         return True
     except Exception as e:
-        print(f"[sector_cache] Error saving cache: {e}")
+        print(f"[sector_cache] Error saving fundamentals cache: {e}")
+        return False
+
+
+def _save_prices_cache(df: pd.DataFrame) -> bool:
+    """Save the prices data to cache."""
+    cache_path = _get_prices_cache_path()
+    
+    try:
+        df.to_parquet(cache_path, index=False)
+        ticker_count = df["ticker"].nunique() if "ticker" in df.columns else 0
+        _update_metadata("prices", ticker_count)
+        print(f"[sector_cache] Saved prices for {ticker_count} stocks to cache")
+        return True
+    except Exception as e:
+        print(f"[sector_cache] Error saving prices cache: {e}")
         return False
 
 
 # =============================================================================
-# Data Collection for Full S&P 500
+# Data Collection: Fundamentals
 # =============================================================================
 
 def _collect_sp500_fundamentals(
     tickers: list[str],
     fetcher: FMPDataFetcher,
-    progress_callback: Optional[callable] = None
-) -> dict:
+    progress_callback: Optional[Callable[[int, int, str], None]] = None
+) -> pd.DataFrame:
     """
-    Collect fundamental data for all S&P 500 stocks.
+    Collect fundamental data (profiles, BS, IS, CF) for all S&P 500 stocks.
     
-    Args:
-        tickers: List of ticker symbols
-        fetcher: FMPDataFetcher instance
-        progress_callback: Optional callback(current, total, ticker) for progress updates
-    
-    Returns:
-        Dictionary with 'balance_sheet', 'income_statement', 'cash_flow' DataFrames
+    Returns a DataFrame with one row per ticker containing:
+    - ticker, sector, industry
+    - Key balance sheet items
+    - Key income statement items
+    - Key cash flow items
     """
     bs_rows = []
     inc_rows = []
     cf_rows = []
-    profile_rows = []
+    profile_data = {}
     
     total = len(tickers)
     
@@ -202,33 +290,36 @@ def _collect_sp500_fundamentals(
             # Fetch profile for sector/industry
             prof = fetcher.get_profile(tk)
             if prof:
-                profile_rows.append(prof)
+                profile_data[tk] = {
+                    "sector": prof.get("sector"),
+                    "industry": prof.get("industry"),
+                }
             
             # Fetch fundamentals
             bs = fetcher.get_balance_sheet(tk)
             inc = fetcher.get_income_statement(tk)
             cf = fetcher.get_cash_flow(tk)
             
-            if isinstance(bs, list):
-                for row in bs:
-                    row["ticker"] = tk
-                    bs_rows.append(row)
+            if isinstance(bs, list) and bs:
+                row = bs[0].copy()  # Most recent
+                row["ticker"] = tk
+                bs_rows.append(row)
             
-            if isinstance(inc, list):
-                for row in inc:
-                    row["ticker"] = tk
-                    inc_rows.append(row)
+            if isinstance(inc, list) and inc:
+                row = inc[0].copy()  # Most recent
+                row["ticker"] = tk
+                inc_rows.append(row)
             
-            if isinstance(cf, list):
-                for row in cf:
-                    row["ticker"] = tk
-                    cf_rows.append(row)
+            if isinstance(cf, list) and cf:
+                row = cf[0].copy()  # Most recent
+                row["ticker"] = tk
+                cf_rows.append(row)
             
             if progress_callback:
-                progress_callback(i + 1, total, tk)
+                progress_callback(i + 1, total, f"Fundamentals: {tk}")
             
         except Exception as e:
-            print(f"[sector_cache] Error fetching {tk}: {e}")
+            print(f"[sector_cache] Error fetching fundamentals for {tk}: {e}")
         
         # Rate limiting
         time.sleep(API_CALL_DELAY)
@@ -236,52 +327,55 @@ def _collect_sp500_fundamentals(
             time.sleep(BATCH_DELAY)
     
     # Build DataFrames
-    bs_df = pd.DataFrame(bs_rows)
-    inc_df = pd.DataFrame(inc_rows)
-    cf_df = pd.DataFrame(cf_rows)
-    profile_df = pd.DataFrame(profile_rows)
+    bs_df = pd.DataFrame(bs_rows) if bs_rows else pd.DataFrame()
+    inc_df = pd.DataFrame(inc_rows) if inc_rows else pd.DataFrame()
+    cf_df = pd.DataFrame(cf_rows) if cf_rows else pd.DataFrame()
     
-    # Merge profile (sector/industry) into fundamentals
-    if not profile_df.empty:
-        for df in [bs_df, inc_df, cf_df]:
-            if not df.empty and "ticker" in df.columns:
-                for col in ["sector", "industry"]:
-                    if col in profile_df.columns and col not in df.columns:
-                        mapping = profile_df.set_index("ticker")[col].to_dict()
-                        df[col] = df["ticker"].map(mapping)
+    # Merge all fundamentals
+    if bs_df.empty:
+        return pd.DataFrame()
     
-    # Convert date columns
-    for df in [bs_df, inc_df, cf_df]:
-        if "date" in df.columns:
-            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    result = bs_df.copy()
     
-    return {
-        "balance_sheet": bs_df,
-        "income_statement": inc_df,
-        "cash_flow": cf_df,
-        "profiles": profile_df,
-    }
+    if not inc_df.empty:
+        # Select key income statement columns
+        inc_cols = ["ticker", "revenue", "netIncome", "grossProfit", "operatingIncome", 
+                    "eps", "ebitda", "weightedAverageShsOut", "weightedAverageShsOutDil"]
+        inc_cols = [c for c in inc_cols if c in inc_df.columns]
+        result = result.merge(inc_df[inc_cols], on="ticker", how="left")
+    
+    if not cf_df.empty:
+        # Select key cash flow columns
+        cf_cols = ["ticker", "freeCashFlow", "operatingCashFlow"]
+        cf_cols = [c for c in cf_cols if c in cf_df.columns]
+        result = result.merge(cf_df[cf_cols], on="ticker", how="left")
+    
+    # Add sector/industry from profiles
+    result["sector"] = result["ticker"].map(lambda tk: profile_data.get(tk, {}).get("sector"))
+    result["industry"] = result["ticker"].map(lambda tk: profile_data.get(tk, {}).get("industry"))
+    
+    # Convert date column
+    if "date" in result.columns:
+        result["date"] = pd.to_datetime(result["date"], errors="coerce")
+    
+    return result
 
+
+# =============================================================================
+# Data Collection: Prices
+# =============================================================================
 
 def _collect_sp500_prices(
     tickers: list[str],
     fetcher: FMPDataFetcher,
     start_date: str,
     end_date: Optional[str] = None,
-    progress_callback: Optional[callable] = None
+    progress_callback: Optional[Callable[[int, int, str], None]] = None
 ) -> pd.DataFrame:
     """
     Collect price data for all S&P 500 stocks.
     
-    Args:
-        tickers: List of ticker symbols
-        fetcher: FMPDataFetcher instance
-        start_date: Start date for price history
-        end_date: End date (defaults to today)
-        progress_callback: Optional callback(current, total, ticker) for progress updates
-    
-    Returns:
-        DataFrame with date, ticker, adjClose, returns, log_returns
+    Returns DataFrame with: date, ticker, adjClose, returns, log_returns
     """
     if end_date is None:
         end_date = datetime.now().strftime("%Y-%m-%d")
@@ -316,10 +410,13 @@ def _collect_sp500_prices(
             ratio = s.div(s.shift(1)).clip(lower=1e-12)
             px["log_returns"] = np.log(ratio)
             
-            frames.append(px)
+            # Keep only necessary columns
+            keep_cols = ["date", "ticker", "adjClose", "returns", "log_returns"]
+            keep_cols = [c for c in keep_cols if c in px.columns]
+            frames.append(px[keep_cols])
             
             if progress_callback:
-                progress_callback(i + 1, total, tk)
+                progress_callback(i + 1, total, f"Prices: {tk}")
             
         except Exception as e:
             print(f"[sector_cache] Error fetching prices for {tk}: {e}")
@@ -336,7 +433,7 @@ def _collect_sp500_prices(
 
 
 # =============================================================================
-# Factor Score Computation (Raw Values)
+# Factor Score Computation
 # =============================================================================
 
 def _safe_div(num, den):
@@ -349,54 +446,24 @@ def _safe_div(num, den):
     return out
 
 
-def _compute_raw_factor_metrics(
-    fundamentals: dict,
-    price_data: pd.DataFrame,
-    profiles: pd.DataFrame
+def _compute_factor_scores(
+    fundamentals: pd.DataFrame,
+    prices: pd.DataFrame
 ) -> pd.DataFrame:
     """
-    Compute raw factor metrics WITHOUT percentile ranking.
-    
-    This computes the underlying ratios and values that will later be
-    ranked against sector peers.
+    Compute raw factor metrics from fundamentals and prices.
     
     Returns DataFrame with columns:
-        ticker, sector, industry, date,
+        ticker, sector, industry,
         bp_ratio, ep_ratio, fcfp_ratio (VALUE)
         roe, roa, gross_margin, fcf_margin, debt_to_equity (QUALITY)
         momentum_60d (MOMENTUM)
         volatility_60d (LOW_VOL)
     """
-    bs = fundamentals.get("balance_sheet", pd.DataFrame())
-    inc = fundamentals.get("income_statement", pd.DataFrame())
-    cf = fundamentals.get("cash_flow", pd.DataFrame())
-    
-    if bs.empty or inc.empty:
+    if fundamentals.empty:
         return pd.DataFrame()
     
-    # Select relevant columns from balance sheet
-    bs_cols = ["ticker", "date", "totalStockholdersEquity", "totalAssets", 
-               "totalLiabilities", "totalDebt", "cashAndCashEquivalents"]
-    
-    if "outstandingShares" in bs.columns:
-        bs_cols.append("outstandingShares")
-    
-    for meta_col in ["sector", "industry"]:
-        if meta_col in bs.columns:
-            bs_cols.append(meta_col)
-    
-    bs_cols = [c for c in bs_cols if c in bs.columns]
-    bs_use = bs[bs_cols].copy()
-    
-    # Select relevant columns from income statement
-    inc_cols = ["ticker", "date", "revenue", "netIncome", "grossProfit", 
-                "operatingIncome", "eps", "ebitda", "weightedAverageShsOut", 
-                "weightedAverageShsOutDil"]
-    inc_cols = [c for c in inc_cols if c in inc.columns]
-    inc_use = inc[inc_cols].copy()
-    
-    # Merge balance sheet and income statement
-    metrics = pd.merge(bs_use, inc_use, on=["ticker", "date"], how="inner")
+    metrics = fundamentals.copy()
     
     # Get shares outstanding
     share_candidates = ["outstandingShares", "weightedAverageShsOut", "weightedAverageShsOutDil"]
@@ -407,32 +474,10 @@ def _compute_raw_factor_metrics(
                 pd.to_numeric(metrics[col], errors="coerce")
             )
     
-    # Merge cash flow data
-    if not cf.empty:
-        cf_cols = ["ticker", "date", "freeCashFlow", "operatingCashFlow"]
-        cf_cols = [c for c in cf_cols if c in cf.columns]
-        if cf_cols:
-            cf_use = cf[cf_cols].copy()
-            metrics = pd.merge(metrics, cf_use, on=["ticker", "date"], how="left")
-    
-    # Add sector/industry from profiles if not already present
-    if not profiles.empty and "ticker" in profiles.columns:
-        for col in ["sector", "industry"]:
-            if col in profiles.columns and col not in metrics.columns:
-                mapping = profiles.set_index("ticker")[col].to_dict()
-                metrics[col] = metrics["ticker"].map(mapping)
-    
-    # Get latest data per ticker
-    metrics["date"] = pd.to_datetime(metrics["date"], errors="coerce")
-    metrics = metrics.sort_values("date").groupby("ticker").last().reset_index()
-    
-    # Book equity
-    metrics["book_equity"] = pd.to_numeric(metrics.get("totalStockholdersEquity"), errors="coerce")
-    
     # Get last price for each ticker
-    if not price_data.empty and "ticker" in price_data.columns:
+    if not prices.empty and "ticker" in prices.columns:
         last_price = (
-            price_data.sort_values("date")
+            prices.sort_values("date")
             .groupby("ticker")["adjClose"]
             .last()
         )
@@ -440,25 +485,26 @@ def _compute_raw_factor_metrics(
     else:
         metrics["price_last"] = np.nan
     
+    # Book equity
+    metrics["book_equity"] = pd.to_numeric(
+        metrics.get("totalStockholdersEquity"), errors="coerce"
+    )
+    
     # Market cap
     metrics["market_cap"] = metrics["shares_out"] * metrics["price_last"]
     
-    # =========================================================================
-    # VALUE FACTORS (raw ratios)
-    # =========================================================================
+    # VALUE FACTORS
     metrics["bp_ratio"] = _safe_div(metrics["book_equity"], metrics["market_cap"])
     metrics["ep_ratio"] = _safe_div(
         pd.to_numeric(metrics.get("netIncome"), errors="coerce"),
         metrics["market_cap"]
     )
     metrics["fcfp_ratio"] = _safe_div(
-        pd.to_numeric(metrics.get("freeCashFlow"), errors="coerce"),
+        pd.to_numeric(metrics.get("freeCashFlow"), errors="coerce") if "freeCashFlow" in metrics.columns else np.nan,
         metrics["market_cap"]
     )
     
-    # =========================================================================
-    # QUALITY FACTORS (raw ratios)
-    # =========================================================================
+    # QUALITY FACTORS
     metrics["roe"] = _safe_div(
         pd.to_numeric(metrics.get("netIncome"), errors="coerce"),
         pd.to_numeric(metrics.get("totalStockholdersEquity"), errors="coerce")
@@ -472,7 +518,7 @@ def _compute_raw_factor_metrics(
         pd.to_numeric(metrics.get("revenue"), errors="coerce")
     )
     metrics["fcf_margin"] = _safe_div(
-        pd.to_numeric(metrics.get("freeCashFlow"), errors="coerce"),
+        pd.to_numeric(metrics.get("freeCashFlow"), errors="coerce") if "freeCashFlow" in metrics.columns else np.nan,
         pd.to_numeric(metrics.get("revenue"), errors="coerce")
     )
     metrics["debt_to_equity"] = _safe_div(
@@ -480,12 +526,10 @@ def _compute_raw_factor_metrics(
         pd.to_numeric(metrics.get("totalStockholdersEquity"), errors="coerce")
     )
     
-    # =========================================================================
-    # MOMENTUM & VOLATILITY (from price data)
-    # =========================================================================
-    if not price_data.empty:
+    # MOMENTUM & VOLATILITY (from prices)
+    if not prices.empty:
         # Momentum: 60-day price change
-        px_pivot = price_data.pivot_table(index="date", columns="ticker", values="adjClose")
+        px_pivot = prices.pivot_table(index="date", columns="ticker", values="adjClose")
         
         if not px_pivot.empty:
             mom_60d = px_pivot.pct_change(60)
@@ -495,7 +539,7 @@ def _compute_raw_factor_metrics(
         
         # Volatility: 60-day rolling std of returns
         vol_60d = (
-            price_data
+            prices
             .sort_values(["ticker", "date"])
             .groupby("ticker")["returns"]
             .apply(lambda x: x.rolling(60, min_periods=30).std().iloc[-1] if len(x) >= 30 else np.nan)
@@ -507,7 +551,7 @@ def _compute_raw_factor_metrics(
     
     # Select output columns
     output_cols = [
-        "ticker", "sector", "industry", "date",
+        "ticker", "sector", "industry",
         # Value
         "bp_ratio", "ep_ratio", "fcfp_ratio",
         # Quality
@@ -516,7 +560,7 @@ def _compute_raw_factor_metrics(
         "momentum_60d",
         # Low Vol
         "volatility_60d",
-        # Additional useful data
+        # Additional
         "market_cap", "price_last"
     ]
     
@@ -532,86 +576,231 @@ def _compute_raw_factor_metrics(
 def get_sp500_sector_scores(
     fetcher: Optional[FMPDataFetcher] = None,
     force_refresh: bool = False,
-    progress_callback: Optional[callable] = None
+    force_refresh_fundamentals: bool = False,
+    force_refresh_prices: bool = False,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None
 ) -> pd.DataFrame:
     """
-    Get S&P 500 factor scores, using cache if available and fresh.
+    Get S&P 500 factor scores using hybrid caching.
+    
+    Fundamentals are refreshed monthly, prices are refreshed weekly (or daily).
     
     Args:
         fetcher: FMPDataFetcher instance (created if not provided)
-        force_refresh: If True, ignore cache and recompute
-        progress_callback: Optional callback(current, total, ticker) for progress updates
+        force_refresh: If True, force refresh of both caches
+        force_refresh_fundamentals: If True, force refresh fundamentals only
+        force_refresh_prices: If True, force refresh prices only
+        progress_callback: Optional callback(current, total, message) for progress updates
     
     Returns:
-        DataFrame with raw factor metrics for all S&P 500 stocks, including:
-        - ticker, sector, industry
-        - Value: bp_ratio, ep_ratio, fcfp_ratio
-        - Quality: roe, roa, gross_margin, fcf_margin, debt_to_equity
-        - Momentum: momentum_60d
-        - Low Vol: volatility_60d
+        DataFrame with factor scores for all S&P 500 stocks
     """
-    # Check if cache is fresh
-    if not force_refresh and not _is_cache_stale():
-        cached = _load_cache()
-        if cached is not None and not cached.empty:
-            return cached
+    # Determine what needs refreshing
+    refresh_fundamentals = force_refresh or force_refresh_fundamentals or _is_fundamentals_stale()
+    refresh_prices = force_refresh or force_refresh_prices or _is_prices_stale()
     
-    # Need to refresh cache
-    print("[sector_cache] Refreshing S&P 500 factor scores cache...")
+    # Load existing caches
+    fundamentals_df = _load_fundamentals_cache() if not refresh_fundamentals else None
+    prices_df = _load_prices_cache() if not refresh_prices else None
     
-    if fetcher is None:
-        if not FMP_API_KEY or FMP_API_KEY == "YOUR_FMP_API_KEY":
-            print("[sector_cache] ERROR: No valid FMP API key configured")
-            # Return empty DataFrame or try to load stale cache
-            stale_cache = _load_cache()
-            if stale_cache is not None:
-                print("[sector_cache] Using stale cache due to missing API key")
-                return stale_cache
-            return pd.DataFrame()
+    # Check if we need to fetch anything
+    need_fetcher = refresh_fundamentals or refresh_prices
+    
+    if need_fetcher:
+        if fetcher is None:
+            if not FMP_API_KEY or FMP_API_KEY == "YOUR_FMP_API_KEY":
+                print("[sector_cache] ERROR: No valid FMP API key configured")
+                # Try to use stale caches if available
+                if fundamentals_df is None:
+                    fundamentals_df = _load_fundamentals_cache()
+                if prices_df is None:
+                    prices_df = _load_prices_cache()
+                
+                if fundamentals_df is None or prices_df is None:
+                    return pd.DataFrame()
+            else:
+                fetcher = FMPDataFetcher(FMP_API_KEY)
         
-        fetcher = FMPDataFetcher(FMP_API_KEY)
+        # Get S&P 500 constituents
+        tickers = fetch_sp500_from_fmp()
+        if not tickers:
+            print("[sector_cache] Using fallback S&P 500 list")
+            tickers = ALL_SP500.copy()
+        
+        print(f"[sector_cache] Processing {len(tickers)} S&P 500 stocks...")
+        
+        # Calculate total steps for progress
+        total_steps = 0
+        if refresh_fundamentals:
+            total_steps += len(tickers)
+        if refresh_prices:
+            total_steps += len(tickers)
+        
+        current_step = 0
+        
+        # Refresh fundamentals if needed
+        if refresh_fundamentals and fetcher:
+            print("[sector_cache] Refreshing fundamentals cache (monthly)...")
+            
+            def fundamentals_progress(current, total, message):
+                nonlocal current_step
+                if progress_callback:
+                    progress_callback(current, total_steps, message)
+            
+            fundamentals_df = _collect_sp500_fundamentals(
+                tickers, fetcher, progress_callback=fundamentals_progress
+            )
+            
+            if not fundamentals_df.empty:
+                sectors = fundamentals_df["sector"].dropna().unique().tolist()
+                _save_fundamentals_cache(fundamentals_df, sectors)
+            
+            current_step = len(tickers)
+        
+        # Refresh prices if needed
+        if refresh_prices and fetcher:
+            print(f"[sector_cache] Refreshing prices cache ({PRICES_REFRESH_DAYS}-day cycle)...")
+            
+            end_date = datetime.now().strftime("%Y-%m-%d")
+            start_date = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
+            
+            def prices_progress(current, total, message):
+                if progress_callback:
+                    progress_callback(current_step + current, total_steps, message)
+            
+            prices_df = _collect_sp500_prices(
+                tickers, fetcher, start_date, end_date, progress_callback=prices_progress
+            )
+            
+            if not prices_df.empty:
+                _save_prices_cache(prices_df)
     
-    # Get S&P 500 constituents
-    tickers = fetch_sp500_from_fmp()
-    if not tickers:
-        print("[sector_cache] Using fallback S&P 500 list")
-        tickers = ALL_SP500.copy()
-    
-    print(f"[sector_cache] Processing {len(tickers)} S&P 500 stocks...")
-    
-    # Calculate date range for price history
-    end_date = datetime.now().strftime("%Y-%m-%d")
-    start_date = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
-    
-    # Collect fundamentals
-    print("[sector_cache] Fetching fundamentals...")
-    fundamentals = _collect_sp500_fundamentals(
-        tickers, fetcher, 
-        progress_callback=lambda c, t, tk: progress_callback(c, t * 2, f"Fundamentals: {tk}") if progress_callback else None
-    )
-    
-    # Collect prices
-    print("[sector_cache] Fetching prices...")
-    price_data = _collect_sp500_prices(
-        tickers, fetcher, start_date, end_date,
-        progress_callback=lambda c, t, tk: progress_callback(t + c, t * 2, f"Prices: {tk}") if progress_callback else None
-    )
-    
-    # Compute raw factor metrics
-    print("[sector_cache] Computing factor metrics...")
-    profiles = fundamentals.get("profiles", pd.DataFrame())
-    factor_scores = _compute_raw_factor_metrics(fundamentals, price_data, profiles)
-    
-    if factor_scores.empty:
-        print("[sector_cache] WARNING: No factor scores computed")
+    # Compute factor scores from cached data
+    if fundamentals_df is None or fundamentals_df.empty:
+        print("[sector_cache] No fundamentals data available")
         return pd.DataFrame()
     
-    # Save to cache
-    _save_cache(factor_scores)
+    if prices_df is None or prices_df.empty:
+        print("[sector_cache] No prices data available, computing without momentum/volatility")
+        prices_df = pd.DataFrame()
     
-    print(f"[sector_cache] Cache refreshed with {len(factor_scores)} stocks")
+    factor_scores = _compute_factor_scores(fundamentals_df, prices_df)
+    
+    print(f"[sector_cache] Computed factor scores for {len(factor_scores)} stocks")
     return factor_scores
 
+
+def get_cache_status() -> dict:
+    """
+    Get detailed information about the current cache status.
+    
+    Returns:
+        Dictionary with cache status information for both fundamentals and prices
+    """
+    metadata = _load_cache_metadata()
+    
+    fundamentals_path = _get_fundamentals_cache_path()
+    prices_path = _get_prices_cache_path()
+    
+    status = {
+        # Overall
+        "cache_exists": fundamentals_path.exists() and prices_path.exists(),
+        "cache_dir": str(_get_cache_dir()),
+        
+        # Fundamentals
+        "fundamentals_exists": fundamentals_path.exists(),
+        "fundamentals_last_updated": metadata.get("fundamentals_last_updated"),
+        "fundamentals_ticker_count": metadata.get("fundamentals_ticker_count", 0),
+        "fundamentals_sectors": metadata.get("fundamentals_sectors", []),
+        "fundamentals_is_stale": _is_fundamentals_stale(),
+        "fundamentals_refresh_days": FUNDAMENTALS_REFRESH_DAYS,
+        
+        # Prices
+        "prices_exists": prices_path.exists(),
+        "prices_last_updated": metadata.get("prices_last_updated"),
+        "prices_ticker_count": metadata.get("prices_ticker_count", 0),
+        "prices_is_stale": _is_prices_stale(),
+        "prices_refresh_days": PRICES_REFRESH_DAYS,
+        
+        # Combined staleness (for backward compatibility)
+        "is_stale": _is_fundamentals_stale() or _is_prices_stale(),
+        "last_updated": metadata.get("prices_last_updated") or metadata.get("fundamentals_last_updated"),
+        "ticker_count": metadata.get("fundamentals_ticker_count", 0),
+        "sectors": metadata.get("fundamentals_sectors", []),
+    }
+    
+    return status
+
+
+def clear_cache() -> bool:
+    """
+    Clear all cache files.
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        fundamentals_path = _get_fundamentals_cache_path()
+        prices_path = _get_prices_cache_path()
+        meta_path = _get_metadata_file_path()
+        
+        if fundamentals_path.exists():
+            fundamentals_path.unlink()
+        if prices_path.exists():
+            prices_path.unlink()
+        if meta_path.exists():
+            meta_path.unlink()
+        
+        print("[sector_cache] All caches cleared")
+        return True
+    except Exception as e:
+        print(f"[sector_cache] Error clearing cache: {e}")
+        return False
+
+
+def clear_fundamentals_cache() -> bool:
+    """Clear only the fundamentals cache."""
+    try:
+        path = _get_fundamentals_cache_path()
+        if path.exists():
+            path.unlink()
+        
+        metadata = _load_cache_metadata()
+        for key in list(metadata.keys()):
+            if key.startswith("fundamentals_"):
+                del metadata[key]
+        _save_cache_metadata(metadata)
+        
+        print("[sector_cache] Fundamentals cache cleared")
+        return True
+    except Exception as e:
+        print(f"[sector_cache] Error clearing fundamentals cache: {e}")
+        return False
+
+
+def clear_prices_cache() -> bool:
+    """Clear only the prices cache."""
+    try:
+        path = _get_prices_cache_path()
+        if path.exists():
+            path.unlink()
+        
+        metadata = _load_cache_metadata()
+        for key in list(metadata.keys()):
+            if key.startswith("prices_"):
+                del metadata[key]
+        _save_cache_metadata(metadata)
+        
+        print("[sector_cache] Prices cache cleared")
+        return True
+    except Exception as e:
+        print(f"[sector_cache] Error clearing prices cache: {e}")
+        return False
+
+
+# =============================================================================
+# Sector Percentile Computation (unchanged from original)
+# =============================================================================
 
 def compute_sector_percentiles(
     stock_metrics: pd.DataFrame,
@@ -763,48 +952,3 @@ def get_sector_percentile_for_ticker(
         percentiles[factor] = float(percentile)
     
     return percentiles
-
-
-def get_cache_status() -> dict:
-    """
-    Get information about the current cache status.
-    
-    Returns:
-        Dictionary with cache status information
-    """
-    cache_path = _get_cache_file_path()
-    metadata = _load_cache_metadata()
-    
-    status = {
-        "cache_exists": cache_path.exists(),
-        "cache_path": str(cache_path),
-        "is_stale": _is_cache_stale(),
-        "last_updated": metadata.get("last_updated"),
-        "ticker_count": metadata.get("ticker_count", 0),
-        "sectors": metadata.get("sectors", []),
-    }
-    
-    return status
-
-
-def clear_cache() -> bool:
-    """
-    Clear the cache files.
-    
-    Returns:
-        True if successful, False otherwise
-    """
-    try:
-        cache_path = _get_cache_file_path()
-        meta_path = _get_metadata_file_path()
-        
-        if cache_path.exists():
-            cache_path.unlink()
-        if meta_path.exists():
-            meta_path.unlink()
-        
-        print("[sector_cache] Cache cleared")
-        return True
-    except Exception as e:
-        print(f"[sector_cache] Error clearing cache: {e}")
-        return False
