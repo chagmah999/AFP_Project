@@ -52,25 +52,46 @@ def compute_factor_performance(factor_returns_hist: pd.DataFrame):
         empty_cum = pd.DataFrame()
         return empty_perf, empty_cum
 
-    # Put on a DatetimeIndex
-    if "date" in df.columns:
-        df["date"] = pd.to_datetime(df["date"])
-        df = df.sort_values("date").set_index("date")
-    else:
-        if not isinstance(df.index, pd.DatetimeIndex):
-            df = df.copy()
-            df.index = pd.to_datetime(df.index, errors="coerce")
-        df = df.sort_index()
+    # ------------------------------------------------------------------
+    # Helper: ensure we have a clean, unique DatetimeIndex
+    # ------------------------------------------------------------------
+    def _ensure_datetime_index(d: pd.DataFrame) -> pd.DataFrame:
+        d = d.copy()
 
-    # Drop NaT dates
-    df = df[~df.index.isna()]
+        if "date" in d.columns:
+            # Try to use the 'date' column as the index
+            d["date"] = pd.to_datetime(d["date"], errors="coerce")
+            # Drop rows where date could not be parsed
+            d = d[~d["date"].isna()]
+            # Sort and set as index if still present
+            if "date" in d.columns:
+                d = d.sort_values("date").set_index("date")
+        else:
+            # Fall back to converting the existing index to datetime
+            if not isinstance(d.index, pd.DatetimeIndex):
+                d.index = pd.to_datetime(d.index, errors="coerce")
+            d = d.sort_index()
+            d = d[~d.index.isna()]
 
-    # IMPORTANT: ensure index is unique to avoid reindex errors
-    if not df.index.is_unique:
-        # Take the last row per date (you could also use mean(), first(), etc.)
-        df = df.groupby(df.index).last()
+        # At this point we should have a DatetimeIndex; enforce uniqueness
+        if not d.index.is_unique:
+            # Collapse duplicates (take last row per date)
+            d = d.groupby(d.index).last()
 
-    # Identify risk-free series if provided
+        return d
+
+    df = _ensure_datetime_index(df)
+
+    if df.empty:
+        empty_perf = pd.DataFrame(
+            columns=["factor", "ann_return", "ann_vol", "sharpe", "max_drawdown"]
+        )
+        empty_cum = pd.DataFrame()
+        return empty_perf, empty_cum
+
+    # ------------------------------------------------------------------
+    # Identify risk-free and factor columns
+    # ------------------------------------------------------------------
     if "rf_daily" in df.columns:
         rf_daily = df["rf_daily"].astype(float)
         candidate_cols = [c for c in df.columns if c != "rf_daily"]
@@ -78,9 +99,9 @@ def compute_factor_performance(factor_returns_hist: pd.DataFrame):
         rf_daily = None
         candidate_cols = list(df.columns)
 
-    # Factor columns = numeric columns that are not clearly risk-free
     factor_cols = []
     for col in candidate_cols:
+        # Skip any obvious rf labels if they somehow sneak in
         if col.lower() in ["rf", "rf_daily", "r_3m", "r_1m"]:
             continue
         if pd.api.types.is_numeric_dtype(df[col]):
@@ -106,7 +127,7 @@ def compute_factor_performance(factor_returns_hist: pd.DataFrame):
         if rf_daily is not None:
             rf_used = rf_daily.reindex(r.index).ffill().fillna(0.0)
         else:
-            rf_used = 0.0  # scalar 0
+            rf_used = 0.0  # scalar 0 if no rf provided
 
         n_days = len(r)
 
@@ -129,7 +150,7 @@ def compute_factor_performance(factor_returns_hist: pd.DataFrame):
         if isinstance(rf_used, pd.Series):
             excess = r - rf_used
             excess_mean = excess.mean()
-            excess_std = r.std(ddof=1)  # using total-return vol as denominator
+            excess_std = r.std(ddof=1)  # use total-return vol as denominator
         else:
             excess_mean = r.mean()
             excess_std = r.std(ddof=1)
@@ -158,6 +179,7 @@ def compute_factor_performance(factor_returns_hist: pd.DataFrame):
     perf_summary = pd.DataFrame(perf_rows).sort_values("factor").reset_index(drop=True)
 
     return perf_summary, cum_paths
+
 
 
 
