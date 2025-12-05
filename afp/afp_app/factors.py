@@ -272,6 +272,21 @@ def calculate_factor_metrics(
         metrics["momentum_score"] = _group_rank("momentum_60d", ascending=True)
 
     metrics = metrics.replace([np.inf, -np.inf], np.nan)
+
+
+
+    # DEBUG: how many tickers per sector actually have factor metrics?
+    if "sector" in metrics.columns:
+        latest = (
+            metrics.sort_values("date")
+            .groupby("ticker")
+            .last()
+            .reset_index()
+        )
+        sector_counts = latest.groupby("sector")["ticker"].nunique()
+        print("Tickers with factor metrics per sector:")
+        print(sector_counts.sort_values(ascending=False))
+
     return metrics
 
 class FactorPortfolioConstructor:
