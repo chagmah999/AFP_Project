@@ -22,6 +22,13 @@ from afp_app.signal_alpha import AlphaPredictor
 from afp_app.engine import MarketMancerEngine
 from afp_app.optimizer import UnifiedPortfolioOptimizer
 
+# Import the new sector cache module
+from afp_app.sector_cache import (
+    get_sp500_sector_scores,
+    get_cache_status,
+    clear_cache as clear_sp500_cache,
+)
+
 
 def compute_factor_performance(factor_returns_hist: pd.DataFrame):
     """
@@ -238,11 +245,46 @@ def compute_factor_performance(factor_returns_hist: pd.DataFrame):
     return perf_summary, cum_paths
 
 
+def load_sp500_reference_cache(api_key: str, force_refresh: bool = False) -> pd.DataFrame:
+    """
+    Load the S&P 500 sector reference cache.
+    
+    This function handles loading or refreshing the cache with proper
+    error handling and progress display.
+    
+    Args:
+        api_key: FMP API key
+        force_refresh: If True, force a cache refresh
+    
+    Returns:
+        DataFrame with S&P 500 factor scores, or empty DataFrame on failure
+    """
+    try:
+        # Create fetcher if we have an API key
+        if api_key and api_key != "YOUR_FMP_API_KEY":
+            fetcher = FMPDataFetcher(api_key=api_key)
+        else:
+            fetcher = None
+        
+        # Get the cached or fresh S&P 500 scores
+        sp500_ref = get_sp500_sector_scores(
+            fetcher=fetcher,
+            force_refresh=force_refresh,
+        )
+        
+        return sp500_ref
+    
+    except Exception as e:
+        st.warning(f"Could not load S&P 500 reference cache: {e}")
+        return pd.DataFrame()
+
+
 st.set_page_config(page_title="AFP Forecasting Tool", layout="wide")
 
 st.title("AFP Forecasting Tool")
 st.caption("Factor premia forecasts, stock-level alpha, and unified portfolio optimization")
 
+# Initialize session state variables
 for key, default in [
     ("base_forecasts", None),
     ("base_factor_eval", None),
@@ -255,6 +297,8 @@ for key, default in [
     ("optimized_portfolio", None),
     ("portfolio_horizon", None),
     ("factor_returns", None),
+    ("sp500_reference", None),  # NEW: Store S&P 500 reference cache
+    ("sp500_cache_status", None),  # NEW: Store cache status info
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -309,7 +353,73 @@ with st.sidebar:
         index=0,
     )
 
-    run_btn = st.button("Run pipeline")
+    # NEW: S&P 500 Cache Management Section
+    st.markdown("### S&P 500 Sector Benchmark")
+    
+    # Display cache status
+    cache_status = get_cache_status()
+    st.session_state["sp500_cache_status"] = cache_status
+    
+    if cache_status.get("cache_exists"):
+        last_updated = cache_status.get("last_updated", "Unknown")
+        ticker_count = cache_status.get("ticker_count", 0)
+        is_stale = cache_status.get("is_stale", True)
+        
+        status_icon = "✅" if not is_stale else "⚠️"
+        st.caption(
+            f"{status_icon} Cache: {ticker_count} stocks\n\n"
+            f"Last updated: {last_updated[:19] if last_updated else 'Unknown'}"
+        )
+        
+        if is_stale:
+            st.caption("Cache is stale and will refresh on next run.")
+    else:
+        st.caption("⚠️ No S&P 500 cache found. Will be created on first run.")
+    
+    # Option to use sector-relative scoring
+    use_sector_relative = st.checkbox(
+        "Use S&P 500 sector-relative scoring",
+        value=True,
+        help="If enabled, factor scores are percentiles relative to all S&P 500 stocks "
+             "in the same sector. If disabled, scores are relative to the selected universe only."
+    )
+    
+    # Button to force refresh the cache
+    col1, col2 = st.columns(2)
+    with col1:
+        refresh_cache_btn = st.button(
+            "Refresh Cache",
+            help="Force refresh the S&P 500 sector benchmark cache",
+        )
+    with col2:
+        clear_cache_btn = st.button(
+            "Clear Cache",
+            help="Delete the cached S&P 500 data",
+        )
+    
+    if clear_cache_btn:
+        if clear_sp500_cache():
+            st.success("Cache cleared!")
+            st.session_state["sp500_reference"] = None
+            st.rerun()
+        else:
+            st.error("Failed to clear cache.")
+    
+    if refresh_cache_btn:
+        if not api_key:
+            st.error("Please enter an API key first.")
+        else:
+            with st.spinner("Refreshing S&P 500 cache... This may take several minutes."):
+                sp500_ref = load_sp500_reference_cache(api_key, force_refresh=True)
+                if not sp500_ref.empty:
+                    st.session_state["sp500_reference"] = sp500_ref
+                    st.success(f"Cache refreshed with {len(sp500_ref)} stocks!")
+                    st.rerun()
+                else:
+                    st.error("Failed to refresh cache.")
+
+    st.markdown("---")
+    run_btn = st.button("Run pipeline", type="primary")
 
 status = st.empty()
 
@@ -321,6 +431,34 @@ if run_btn:
         st.stop()
 
     st.session_state["portfolio_horizon"] = int(forecast_horizon)
+
+    # =========================================================
+    # NEW: Load S&P 500 reference cache (if using sector-relative scoring)
+    # =========================================================
+    sp500_reference = pd.DataFrame()
+    
+    if use_sector_relative:
+        status.info("Loading S&P 500 sector benchmark cache...")
+        
+        # Check if we already have it in session state and it's not stale
+        cached_ref = st.session_state.get("sp500_reference")
+        cache_status = get_cache_status()
+        
+        if cached_ref is not None and not cached_ref.empty and not cache_status.get("is_stale", True):
+            sp500_reference = cached_ref
+            status.success(f"Using cached S&P 500 benchmark ({len(sp500_reference)} stocks)")
+        else:
+            # Load or refresh the cache
+            sp500_reference = load_sp500_reference_cache(api_key, force_refresh=False)
+            
+            if not sp500_reference.empty:
+                st.session_state["sp500_reference"] = sp500_reference
+                status.success(f"S&P 500 benchmark loaded ({len(sp500_reference)} stocks)")
+            else:
+                status.warning(
+                    "Could not load S&P 500 benchmark. "
+                    "Factor scores will be relative to the selected universe only."
+                )
 
     status.info("Selecting universe...")
     tickers = get_universe(
@@ -346,7 +484,17 @@ if run_btn:
     )
 
     status.info("Computing factor scores and factor returns...")
-    metrics = calculate_factor_metrics(fundamentals, prices)
+    
+    # MODIFIED: Pass sp500_reference to calculate_factor_metrics
+    if use_sector_relative and not sp500_reference.empty:
+        metrics = calculate_factor_metrics(
+            fundamentals, 
+            prices,
+            sp500_reference=sp500_reference,
+            use_sector_relative=True
+        )
+    else:
+        metrics = calculate_factor_metrics(fundamentals, prices)
 
     factor_returns = pd.DataFrame()
     if metrics.empty:
@@ -385,8 +533,14 @@ if run_btn:
             if c in latest.columns
         ]
 
+        # MODIFIED: Include sector in the sample scores table
+        display_cols = ["ticker"]
+        if "sector" in latest.columns:
+            display_cols.append("sector")
+        display_cols.extend(score_cols)
+
         if score_cols:
-            sample = latest[["ticker"] + score_cols].sort_values("ticker")
+            sample = latest[display_cols].sort_values("ticker")
         else:
             sample = None
 
@@ -586,9 +740,9 @@ else:
 
     if forecasts:
         st.caption(
-            "These forecasts estimate each factor’s expected return (in percent) over the next *H* days, "
+            "These forecasts estimate each factor's expected return (in percent) over the next *H* days, "
             "where *H* is the forecast horizon set by the user. The primary forecast uses a simple AR(1) "
-            "model on each factor’s own history, while macro features are used for diagnostics and driver "
+            "model on each factor's own history, while macro features are used for diagnostics and driver "
             "analysis. Higher values indicate a stronger expected tailwind for that factor (candidates to "
             "overweight), while negative values indicate expected headwinds (candidates to underweight)."
         )
@@ -656,7 +810,7 @@ else:
             st.subheader("Top drivers per factor")
             st.caption(
                 "The table below shows which macro features the model found most predictive "
-                "when forecasting each factor’s expected return over the next *H* days. "
+                "when forecasting each factor's expected return over the next *H* days. "
                 "These macro features include rate levels, "
                 "term spreads, credit spreads, and volatility measures. More technically, "
                 "'most predictive' means these features produced the largest reductions in forecast "
@@ -679,7 +833,7 @@ else:
                 "comes immediately after it, mimicking real-time forecasting. We report accuracy for two models: "
                 "a simple AR(1) baseline and a three-model machine-learning ensemble (Ridge, Lasso, Random Forest). "
                 "For each, we show the direction hit rate (how often the model correctly predicted the sign of the "
-                "factor’s forward return), as well as RMSE and MAE to measure numerical forecast error. "
+                "factor's forward return), as well as RMSE and MAE to measure numerical forecast error. "
             )
 
             eval_rows = []
@@ -732,10 +886,15 @@ else:
     else:
         st.info("No factor forecasts available.")
 
+    # =========================================================
+    # MODIFIED: Universe and stock-level factor scores section
+    # =========================================================
     with st.expander("Show universe and stock-level factor scores (details)"):
         uni = st.session_state.get("universe_tickers")
         port_sizes = st.session_state.get("factor_portfolio_sizes")
         sample_scores = st.session_state.get("sample_factor_scores")
+        sp500_ref = st.session_state.get("sp500_reference")
+        cache_status = st.session_state.get("sp500_cache_status", {})
 
         if uni:
             st.markdown(f"**Universe size**: {len(uni)}")
@@ -749,8 +908,47 @@ else:
             st.json(port_sizes)
 
         if isinstance(sample_scores, pd.DataFrame) and not sample_scores.empty:
-            st.markdown("**Stock-level, sector-adjusted factor scores (0 to 1)**")
-            st.dataframe(sample_scores, use_container_width=True)
+            # MODIFIED: Updated description based on scoring method
+            if sp500_ref is not None and not sp500_ref.empty:
+                sp500_count = len(sp500_ref)
+                sectors_in_ref = sp500_ref["sector"].nunique() if "sector" in sp500_ref.columns else 0
+                
+                st.markdown("**Stock-level factor scores (0 to 1) — S&P 500 Sector-Relative**")
+                st.caption(
+                    f"Each score represents the stock's percentile rank compared to **all {sp500_count} S&P 500 stocks** "
+                    f"in the same sector (across {sectors_in_ref} sectors). A score of 0.80 means the stock ranks "
+                    "better than 80% of its S&P 500 sector peers on that factor."
+                )
+            else:
+                st.markdown("**Stock-level factor scores (0 to 1) — Universe-Relative**")
+                st.caption(
+                    "Each score represents the stock's percentile rank compared to other stocks "
+                    "in the selected universe (sector-adjusted where possible). A score of 0.80 means "
+                    "the stock ranks better than 80% of universe peers on that factor."
+                )
+            
+            # Format the scores nicely
+            score_display = sample_scores.copy()
+            format_dict = {}
+            for col in score_display.columns:
+                if col.endswith("_score"):
+                    format_dict[col] = "{:.2f}"
+            
+            st.dataframe(
+                score_display.style.format(format_dict),
+                use_container_width=True,
+            )
+            
+            # Show S&P 500 cache info
+            if cache_status:
+                with st.expander("S&P 500 Benchmark Cache Info"):
+                    st.json({
+                        "cache_exists": cache_status.get("cache_exists", False),
+                        "last_updated": cache_status.get("last_updated", "Unknown"),
+                        "ticker_count": cache_status.get("ticker_count", 0),
+                        "sectors": cache_status.get("sectors", []),
+                        "is_stale": cache_status.get("is_stale", True),
+                    })
 
     st.subheader("Optimized unified portfolio")
 
@@ -758,14 +956,14 @@ else:
 
     if isinstance(optimized_portfolio, pd.DataFrame) and not optimized_portfolio.empty:
         st.caption(
-            "This section shows a unified long/short portfolio built from the model’s *H*-day stock-level alpha forecasts. "
+            "This section shows a unified long/short portfolio built from the model's *H*-day stock-level alpha forecasts. "
             "The optimizer chooses weights that maximize expected *H*-day portfolio alpha relative to portfolio risk, "
             "where risk is measured using a Ledoit Wolf shrinkage estimate of the recent return covariance matrix. "
             "Stocks with higher expected alpha and more favorable risk characteristics receive higher positive weights "
             "(long positions), while stocks with negative expected alpha receive negative weights (short positions). "
             "For stability, the portfolio enforces practical constraints: no individual position may exceed the per-stock "
-            "weight cap (currently 10 percent), and total gross exposure is limited (currently at 1.5 times the portfolio’s "
-            "capital). The table reports each stock’s portfolio weight, side, and its own expected *H*-day alpha in percent."
+            "weight cap (currently 10 percent), and total gross exposure is limited (currently at 1.5 times the portfolio's "
+            "capital). The table reports each stock's portfolio weight, side, and its own expected *H*-day alpha in percent."
         )
         st.dataframe(
             optimized_portfolio.style.format(
@@ -806,7 +1004,7 @@ else:
     st.caption(
         "This section lists the 10 stocks with the highest expected *H*-day alpha from a Lasso regression that links "
         "standardized stock characteristics (valuation, quality, momentum, size, etc.) to their future *H*-day returns. "
-        "For each name, the expected alpha is the model’s forecast of its *H*-day excess return (in percent) based on "
+        "For each name, the expected alpha is the model's forecast of its *H*-day excess return (in percent) based on "
         "those historical relationships, and the fundamental score summarizes how attractive its fundamentals look on those "
         "same dimensions."
     )
@@ -853,7 +1051,7 @@ else:
         st.caption(
             "For each stock, the model predicts its expected *H*-day alpha using a Lasso regression trained on "
             "historical data. All input features are standardized before estimation, so each coefficient measures "
-            "how a one standard deviation increase in that feature changes the stock’s predicted *H*-day alpha, "
+            "how a one standard deviation increase in that feature changes the stock's predicted *H*-day alpha, "
             "holding other features fixed. A positive coefficient means higher values of the feature are associated "
             "with higher predicted alpha, and a negative coefficient means the opposite."
         )
