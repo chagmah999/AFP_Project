@@ -13,7 +13,7 @@ def calculate_factor_metrics(
     fundamentals: dict,
     price_data: pd.DataFrame
 ) -> pd.DataFrame:
- 
+
     bs = fundamentals.get("balance_sheet", pd.DataFrame())
     inc = fundamentals.get("income_statement", pd.DataFrame())
     cf = fundamentals.get("cash_flow", pd.DataFrame())
@@ -47,7 +47,6 @@ def calculate_factor_metrics(
         "operatingIncome",
         "eps",
         "ebitda",
-
         "weightedAverageShsOut",
         "weightedAverageShsOutDil",
     ]
@@ -163,12 +162,13 @@ def calculate_factor_metrics(
     for tk in vol_60d.index:
         metrics.loc[metrics["ticker"] == tk, "volatility_60d"] = vol_60d[tk]
 
+    # Grouping variable for sector or industry neutralization
     if "sector" in metrics.columns:
         group_cols = ["sector"]
     elif "industry" in metrics.columns:
         group_cols = ["industry"]
     else:
-        group_cols = []  
+        group_cols = []
 
     def _rank_pct(series: pd.Series, ascending: bool = True) -> pd.Series:
         return series.rank(method="average", pct=True, ascending=ascending)
@@ -189,12 +189,14 @@ def calculate_factor_metrics(
             return pd.Series(index=series.index, data=np.nan)
         return (series - mu) / sigma
 
+    # VALUE
     value_components = []
 
     if "bp_ratio" in metrics.columns:
         metrics["z_bp"] = (
             metrics.groupby(group_cols)["bp_ratio"]
             .transform(_zscore_grouped)
+            if group_cols else _zscore_grouped(metrics["bp_ratio"])
         )
         value_components.append("z_bp")
 
@@ -202,6 +204,7 @@ def calculate_factor_metrics(
         metrics["z_ep"] = (
             metrics.groupby(group_cols)["ep_ratio"]
             .transform(_zscore_grouped)
+            if group_cols else _zscore_grouped(metrics["ep_ratio"])
         )
         value_components.append("z_ep")
 
@@ -209,6 +212,7 @@ def calculate_factor_metrics(
         metrics["z_fcfp"] = (
             metrics.groupby(group_cols)["fcfp_ratio"]
             .transform(_zscore_grouped)
+            if group_cols else _zscore_grouped(metrics["fcfp_ratio"])
         )
         value_components.append("z_fcfp")
 
@@ -225,6 +229,7 @@ def calculate_factor_metrics(
                 metrics["value_raw"], ascending=False
             )
 
+    # QUALITY
     quality_components = []
 
     if "roe" in metrics.columns:
@@ -244,7 +249,6 @@ def calculate_factor_metrics(
         quality_components.append("q_fcfm")
 
     if "debt_to_equity" in metrics.columns:
-
         if group_cols:
             lev_rank = (
                 metrics.groupby(group_cols)["debt_to_equity"]
@@ -258,6 +262,7 @@ def calculate_factor_metrics(
     if quality_components:
         metrics["quality_score"] = metrics[quality_components].mean(axis=1)
 
+    # LOW VOL
     if "volatility_60d" in metrics.columns:
         if group_cols:
             vol_rank = (
@@ -268,30 +273,42 @@ def calculate_factor_metrics(
             vol_rank = _rank_pct(metrics["volatility_60d"], ascending=True)
         metrics["lowvol_score"] = 1.0 - vol_rank
 
+    # MOMENTUM
     if "momentum_60d" in metrics.columns:
         metrics["momentum_score"] = _group_rank("momentum_60d", ascending=True)
 
     metrics = metrics.replace([np.inf, -np.inf], np.nan)
 
+    # Attach peer counts so you can see effective group sizes in the app
+    # We use the latest observation per ticker so each ticker has one sector or industry
+    latest = (
+        metrics.sort_values("date")
+        .groupby("ticker")
+        .last()
+        .reset_index()
+    )
 
-
-    # DEBUG: how many tickers per sector actually have factor metrics?
-    if "sector" in metrics.columns:
-        latest = (
-            metrics.sort_values("date")
-            .groupby("ticker")
-            .last()
-            .reset_index()
-        )
+    if "sector" in latest.columns:
         sector_counts = latest.groupby("sector")["ticker"].nunique()
-        print("Tickers with factor metrics per sector:")
-        print(sector_counts.sort_values(ascending=False))
+        metrics = metrics.merge(
+            sector_counts.rename("sector_peer_count"),
+            on="sector",
+            how="left",
+        )
+    elif "industry" in latest.columns:
+        industry_counts = latest.groupby("industry")["ticker"].nunique()
+        metrics = metrics.merge(
+            industry_counts.rename("industry_peer_count"),
+            on="industry",
+            how="left",
+        )
 
     return metrics
 
+
 class FactorPortfolioConstructor:
     """
-    Construct long-short factor portfolios from 0-1 factor scores and compute factor returns.
+    Construct long short factor portfolios from 0 1 factor scores and compute factor returns.
     """
 
     def __init__(self, metrics_df: pd.DataFrame, price_df: pd.DataFrame):
@@ -306,7 +323,7 @@ class FactorPortfolioConstructor:
         ascending: bool,
         percentile: float = 0.3,
     ) -> pd.DataFrame:
-       
+
         if self.metrics.empty or metric_column not in self.metrics.columns:
             return pd.DataFrame()
 
@@ -324,11 +341,9 @@ class FactorPortfolioConstructor:
         high = valid.quantile(1 - percentile)
 
         if ascending:
-
             long_tk = valid[valid <= low].index.tolist()
             short_tk = valid[valid >= high].index.tolist()
         else:
-
             long_tk = valid[valid >= high].index.tolist()
             short_tk = valid[valid <= low].index.tolist()
 
@@ -347,7 +362,7 @@ class FactorPortfolioConstructor:
         return port
 
     def construct_all(self) -> dict[str, pd.DataFrame]:
-     
+
         ports: dict[str, pd.DataFrame] = {}
 
         if "value_score" in self.metrics.columns:
@@ -386,7 +401,7 @@ class FactorPortfolioConstructor:
         start_date: str,
         end_date: str,
     ) -> pd.DataFrame:
-       
+
         rets = []
 
         for fname, port in self.portfolios.items():
