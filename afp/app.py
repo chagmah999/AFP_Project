@@ -43,46 +43,53 @@ def compute_factor_performance(factor_returns_hist: pd.DataFrame):
       - cum_paths: DataFrame with cumulative return paths (in decimal, not percent)
           indexed by date, one column per factor
     """
-    # Defensive copy
     df = factor_returns_hist.copy()
 
     if df.empty:
-        empty_perf = pd.DataFrame(columns=["factor", "ann_return", "ann_vol", "sharpe", "max_drawdown"])
+        empty_perf = pd.DataFrame(
+            columns=["factor", "ann_return", "ann_vol", "sharpe", "max_drawdown"]
+        )
         empty_cum = pd.DataFrame()
         return empty_perf, empty_cum
 
-    # Handle date index
+    # Put on a DatetimeIndex
     if "date" in df.columns:
         df["date"] = pd.to_datetime(df["date"])
         df = df.sort_values("date").set_index("date")
     else:
-        # Ensure index is datetime if possible
         if not isinstance(df.index, pd.DatetimeIndex):
             df = df.copy()
             df.index = pd.to_datetime(df.index, errors="coerce")
-            df = df.sort_index()
+        df = df.sort_index()
+
+    # Drop NaT dates
+    df = df[~df.index.isna()]
+
+    # IMPORTANT: ensure index is unique to avoid reindex errors
+    if not df.index.is_unique:
+        # Take the last row per date (you could also use mean(), first(), etc.)
+        df = df.groupby(df.index).last()
 
     # Identify risk-free series if provided
     if "rf_daily" in df.columns:
         rf_daily = df["rf_daily"].astype(float)
-        # We will drop it from factor columns
         candidate_cols = [c for c in df.columns if c != "rf_daily"]
     else:
         rf_daily = None
         candidate_cols = list(df.columns)
 
-    # Factor columns are everything numeric that is not the rf series
-    # You can tweak this if you have other non-factor numeric columns.
+    # Factor columns = numeric columns that are not clearly risk-free
     factor_cols = []
     for col in candidate_cols:
-        # Skip clearly non-factor columns if any
         if col.lower() in ["rf", "rf_daily", "r_3m", "r_1m"]:
             continue
         if pd.api.types.is_numeric_dtype(df[col]):
             factor_cols.append(col)
 
     if not factor_cols:
-        empty_perf = pd.DataFrame(columns=["factor", "ann_return", "ann_vol", "sharpe", "max_drawdown"])
+        empty_perf = pd.DataFrame(
+            columns=["factor", "ann_return", "ann_vol", "sharpe", "max_drawdown"]
+        )
         empty_cum = pd.DataFrame()
         return empty_perf, empty_cum
 
@@ -95,37 +102,35 @@ def compute_factor_performance(factor_returns_hist: pd.DataFrame):
         if r.empty:
             continue
 
-        # Align rf_daily if available
+        # Align rf_daily to this factor's dates if present
         if rf_daily is not None:
-            rf_used = rf_daily.reindex(r.index).fillna(method="ffill").fillna(0.0)
+            rf_used = rf_daily.reindex(r.index).ffill().fillna(0.0)
         else:
             rf_used = 0.0  # scalar 0
 
         n_days = len(r)
 
-        # Cumulative return path for this factor (gross return path)
-        # (1 + r).cumprod() gives gross, minus 1 gives cumulative simple return
+        # Cumulative simple return path
         cum = (1.0 + r).cumprod() - 1.0
         cum_paths[fac] = cum
 
-        # Annualized return (simple) from realized path
+        # Annualized return from realized total return
         total_return = (1.0 + r).prod() - 1.0
         if n_days > 0:
             ann_return = (1.0 + total_return) ** (ann_factor / n_days) - 1.0
         else:
             ann_return = np.nan
 
-        # Annualized volatility (using daily std dev)
+        # Annualized volatility
         daily_vol = r.std(ddof=1)
         ann_vol = daily_vol * np.sqrt(ann_factor)
 
-        # Sharpe ratio using excess returns vs rf_daily if provided
+        # Sharpe ratio (excess return vs rf_daily if available)
         if isinstance(rf_used, pd.Series):
             excess = r - rf_used
             excess_mean = excess.mean()
-            excess_std = r.std(ddof=1)  # volatility of total returns as denominator
+            excess_std = r.std(ddof=1)  # using total-return vol as denominator
         else:
-            # rf_used is scalar 0.0
             excess_mean = r.mean()
             excess_std = r.std(ddof=1)
 
@@ -134,11 +139,11 @@ def compute_factor_performance(factor_returns_hist: pd.DataFrame):
         else:
             sharpe = np.nan
 
-        # Max drawdown based on cumulative gross path
+        # Max drawdown on gross return path
         gross_path = (1.0 + r).cumprod()
         running_max = gross_path.cummax()
         drawdown = gross_path / running_max - 1.0
-        max_dd = drawdown.min()  # typically negative
+        max_dd = drawdown.min()  # most negative drawdown
 
         perf_rows.append(
             {
@@ -150,12 +155,10 @@ def compute_factor_performance(factor_returns_hist: pd.DataFrame):
             }
         )
 
-    perf_summary = pd.DataFrame(perf_rows)
-
-    # Optional: sort factors alphabetically or by ann_return
-    perf_summary = perf_summary.sort_values("factor").reset_index(drop=True)
+    perf_summary = pd.DataFrame(perf_rows).sort_values("factor").reset_index(drop=True)
 
     return perf_summary, cum_paths
+
 
 
 
