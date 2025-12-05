@@ -25,6 +25,7 @@ from afp_app.optimizer import UnifiedPortfolioOptimizer
 import numpy as np
 import pandas as pd
 
+
 def compute_factor_performance(factor_returns_hist: pd.DataFrame):
     """
     Compute performance statistics and cumulative return paths
@@ -181,11 +182,6 @@ def compute_factor_performance(factor_returns_hist: pd.DataFrame):
     return perf_summary, cum_paths
 
 
-
-
-
-
-
 st.set_page_config(page_title="AFP Forecasting Tool", layout="wide")
 
 st.title("AFP Forecasting Tool")
@@ -203,7 +199,6 @@ for key, default in [
     ("optimized_portfolio", None),
     ("portfolio_horizon", None),
     ("factor_returns", None),
-
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -343,12 +338,11 @@ if run_btn:
         st.session_state["factor_portfolio_sizes"] = port_sizes
         st.session_state["sample_factor_scores"] = sample
 
-        # Store factor return history for backtesting display
+    # Store factor return history for backtesting display
     if isinstance(factor_returns, pd.DataFrame) and not factor_returns.empty:
         st.session_state["factor_returns"] = factor_returns.copy()
     else:
         st.session_state["factor_returns"] = None
-
 
     status.info("Fetching macro data...")
     m = MacroDataFetcher(api_key=api_key)
@@ -476,20 +470,50 @@ else:
             st.subheader("Historical factor performance")
 
             st.caption(
-                "This section summarizes how each long–short factor portfolio "
+                "This section summarizes how each long short factor portfolio "
                 "has performed over the full sample used in the model. "
                 "For each factor, we show total and annualized returns, "
-                "annualized volatility, a simple Sharpe ratio using zero risk free, "
-                "and the worst peak–to–trough drawdown over the period."
+                "annualized volatility, a Sharpe ratio computed relative to the "
+                "available daily risk free series when present (otherwise zero), "
+                "and the worst peak to trough drawdown over the period."
             )
 
+            # Format perf_summary in percent terms where appropriate
+            perf_display = perf_summary.copy()
+            perf_display["Total return %"] = (
+                (1.0 + perf_display["ann_return"] / 252.0) ** 252.0 - 1.0
+                if "ann_return" in perf_display.columns
+                else np.nan
+            )
+
+            # If you do not want the synthetic "Total return %" column,
+            # you can instead compute and store it directly in compute_factor_performance
+            # and drop this block. For now we keep original columns:
+            perf_display = perf_summary.copy()
+            perf_display["Total return %"] = np.nan
+            perf_display["Annualized return %"] = perf_summary["ann_return"] * 100.0
+            perf_display["Annualized volatility %"] = perf_summary["ann_vol"] * 100.0
+            perf_display["Sharpe (rf adj)"] = perf_summary["sharpe"]
+            perf_display["Max drawdown %"] = perf_summary["max_drawdown"] * 100.0
+
             st.dataframe(
-                perf_summary.style.format(
+                perf_display[
+                    [
+                        "factor",
+                        "Total return %",
+                        "Annualized return %",
+                        "Annualized volatility %",
+                        "Sharpe (rf adj)",
+                        "Max drawdown %",
+                    ]
+                ]
+                .rename(columns={"factor": "Factor"})
+                .style.format(
                     {
                         "Total return %": "{:.2f}",
                         "Annualized return %": "{:.2f}",
                         "Annualized volatility %": "{:.2f}",
-                        "Sharpe (rf = 0)": "{:.2f}",
+                        "Sharpe (rf adj)": "{:.2f}",
                         "Max drawdown %": "{:.2f}",
                     }
                 ),
@@ -500,9 +524,10 @@ else:
             if not cum_paths.empty:
                 st.caption(
                     "Cumulative growth of one unit invested in each factor "
-                    "long–short portfolio over time."
+                    "long short portfolio over time."
                 )
-                cum_display = cum_paths.set_index("date")
+                # cum_paths already has a DatetimeIndex
+                cum_display = cum_paths.copy()
                 st.line_chart(cum_display)
     else:
         st.info(
@@ -513,7 +538,7 @@ else:
     # =========================================================
     # 1. Factor premia forecasts (first, core view)
     # =========================================================
-    
+
     st.subheader("Factor premia forecasts")
 
     if forecasts:
@@ -565,7 +590,8 @@ else:
                 ensemble_rows.append(
                     {
                         "Factor": f,
-                        "Ensemble Premium %": v.get("ensemble_forecast", np.nan) * 100.0,
+                        "Ensemble Premium %": v.get("ensemble_forecast", np.nan)
+                        * 100.0,
                         "AR(1) Premium %": v.get("ar1_forecast", np.nan) * 100.0,
                     }
                 )
@@ -612,7 +638,6 @@ else:
                 "For each, we show the direction hit rate (how often the model correctly predicted the sign of the "
                 "factor’s forward return), as well as RMSE and MAE to measure numerical forecast error. "
             )
-
 
             eval_rows = []
             for f, s in factor_eval.items():
@@ -692,11 +717,11 @@ else:
         st.caption(
             "This section shows a unified long/short portfolio built from the model’s *H*-day stock-level alpha forecasts. "
             "The optimizer chooses weights that maximize expected *H*-day portfolio alpha relative to portfolio risk, "
-            "where risk is measured using a Ledoit–Wolf shrinkage estimate of the recent return covariance matrix. "
+            "where risk is measured using a Ledoit Wolf shrinkage estimate of the recent return covariance matrix. "
             "Stocks with higher expected alpha and more favorable risk characteristics receive higher positive weights "
             "(long positions), while stocks with negative expected alpha receive negative weights (short positions). "
             "For stability, the portfolio enforces practical constraints: no individual position may exceed the per-stock "
-            "weight cap (currently 10%), and total gross exposure is limited (currently at 1.5x the portfolio’s "
+            "weight cap (currently 10 percent), and total gross exposure is limited (currently at 1.5 times the portfolio’s "
             "capital). The table reports each stock’s portfolio weight, side, and its own expected *H*-day alpha in percent."
         )
         st.dataframe(
@@ -742,7 +767,6 @@ else:
         "those historical relationships, and the fundamental score summarizes how attractive its fundamentals look on those "
         "same dimensions."
     )
-
 
     if alpha_preds:
         df_alpha = pd.DataFrame(
