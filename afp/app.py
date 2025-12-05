@@ -380,6 +380,47 @@ if run_btn:
         metrics = pd.DataFrame()
     else:
         metrics = metrics_full[metrics_full["ticker"].isin(tickers)].copy()
+
+    # ==============================================================
+    # DIAGNOSTIC: Compare original universe-only scoring vs full S&P scoring
+    # ==============================================================
+
+    with st.expander("DEBUG: Compare factor scores (Universe-only vs Full S&P sector percentiles)"):
+        try:
+            # --- Method A: Old behavior (universe only) ---
+            metrics_universe_only = calculate_factor_metrics(fundamentals, prices)
+            latest_A = (
+                metrics_universe_only.sort_values("date")
+                .groupby("ticker")
+                .last()
+                .reset_index()
+            )
+            table_A = latest_A[
+                ["ticker", "value_score", "quality_score", "momentum_score", "lowvol_score"]
+            ].sort_values("ticker")
+    
+            st.markdown("### Method A: Percentiles computed **within selected universe only**")
+            st.dataframe(table_A, use_container_width=True)
+    
+            # --- Method B: New behavior (full S&P) ---
+            latest_B = (
+                metrics_full.sort_values("date")
+                .groupby("ticker")
+                .last()
+                .reset_index()
+            )
+            table_B = latest_B[
+                latest_B["ticker"].isin(tickers)
+            ][
+                ["ticker", "value_score", "quality_score", "momentum_score", "lowvol_score"]
+            ].sort_values("ticker")
+    
+            st.markdown("### Method B: Percentiles computed **within full S&P 500 sectors**")
+            st.dataframe(table_B, use_container_width=True)
+    
+        except Exception as e:
+            st.warning(f"Unable to generate diagnostic score comparison: {e}")
+
     
     factor_returns = pd.DataFrame()
     if metrics.empty:
