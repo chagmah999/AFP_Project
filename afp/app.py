@@ -27,10 +27,6 @@ from afp_app.sector_cache import (
     get_sp500_sector_scores,
     get_cache_status,
     clear_cache as clear_sp500_cache,
-    clear_fundamentals_cache,
-    clear_prices_cache,
-    FUNDAMENTALS_REFRESH_DAYS,
-    PRICES_REFRESH_DAYS,
 )
 
 
