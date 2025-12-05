@@ -25,151 +25,138 @@ from afp_app.optimizer import UnifiedPortfolioOptimizer
 import numpy as np
 import pandas as pd
 
-def compute_factor_performance(
-    factor_returns: pd.DataFrame,
-    macro_frame: pd.DataFrame | None = None,
-    rf_col: str = "R_3M",
-) -> pd.DataFrame:
+def compute_factor_performance(factor_returns_hist: pd.DataFrame):
     """
-    Compute historical performance statistics for each factor portfolio.
+    Compute performance statistics and cumulative return paths
+    for each factor in factor_returns_hist.
 
-    Inputs
-    ------
-    factor_returns : DataFrame
-        Long-format factor returns with columns:
-            - 'date'   : pandas.Timestamp or datetime-like
-            - 'factor' : factor name (e.g. 'VALUE', 'QUALITY', 'MOMENTUM', 'LOW_VOL')
-            - 'return' : daily factor return in decimal form (0.01 = 1%)
+    Expected input:
+      - factor_returns_hist: DataFrame with
+          * either a DatetimeIndex or a 'date' column
+          * one column per factor, e.g. 'VALUE', 'QUALITY', 'MOMENTUM', 'LOW_VOL'
+          * optionally an 'rf_daily' column with the daily risk-free rate in decimals
+            (for example, 3M T-bill yield / 252). If not present, rf is assumed to be 0.
 
-    macro_frame : DataFrame or None
-        Optional macro data with at least:
-            - 'date'
-            - rf_col (for example 'R_3M'), which is a daily risk-free rate in percent
-              (for example 4.5 means 4.5 percent per year)
-
-        If provided and rf_col is present, Sharpe ratios are computed using
-        *excess returns* over this risk-free rate. If not, the risk-free rate
-        is treated as zero.
-
-    rf_col : str
-        Column name in macro_frame that contains the annualized risk-free rate
-        in percent (for example 3-month Treasury yield).
-
-    Output
-    ------
-    perf : DataFrame
-        One row per factor with columns:
-            - factor
-            - start_date
-            - end_date
-            - n_days
-            - total_return_pct
-            - ann_return_pct
-            - ann_excess_return_pct
-            - ann_vol_pct
-            - sharpe
-            - max_drawdown_pct
+    Returns:
+      - perf_summary: DataFrame with one row per factor and columns:
+          ['factor', 'ann_return', 'ann_vol', 'sharpe', 'max_drawdown']
+      - cum_paths: DataFrame with cumulative return paths (in decimal, not percent)
+          indexed by date, one column per factor
     """
+    # Defensive copy
+    df = factor_returns_hist.copy()
 
-    if factor_returns is None or factor_returns.empty:
-        return pd.DataFrame()
+    if df.empty:
+        empty_perf = pd.DataFrame(columns=["factor", "ann_return", "ann_vol", "sharpe", "max_drawdown"])
+        empty_cum = pd.DataFrame()
+        return empty_perf, empty_cum
 
-    # Ensure date is datetime
-    factor_returns = factor_returns.copy()
-    factor_returns["date"] = pd.to_datetime(factor_returns["date"])
+    # Handle date index
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.sort_values("date").set_index("date")
+    else:
+        # Ensure index is datetime if possible
+        if not isinstance(df.index, pd.DatetimeIndex):
+            df = df.copy()
+            df.index = pd.to_datetime(df.index, errors="coerce")
+            df = df.sort_index()
 
-    # Prepare risk-free series if available
-    use_rf = False
-    rf_df = None
-    if macro_frame is not None and rf_col in macro_frame.columns:
-        rf_df = macro_frame[["date", rf_col]].copy()
-        rf_df["date"] = pd.to_datetime(rf_df["date"])
-        # Convert from percent to daily decimal rate
-        # Example: R_3M = 4.5 -> annual 0.045 -> daily approx 0.045 / 252
-        rf_df["rf_daily"] = (rf_df[rf_col] / 100.0) / 252.0
-        use_rf = True
+    # Identify risk-free series if provided
+    if "rf_daily" in df.columns:
+        rf_daily = df["rf_daily"].astype(float)
+        # We will drop it from factor columns
+        candidate_cols = [c for c in df.columns if c != "rf_daily"]
+    else:
+        rf_daily = None
+        candidate_cols = list(df.columns)
 
-    rows = []
-    for f_name, df_f in factor_returns.groupby("factor"):
-        df_f = df_f.sort_values("date").copy()
-        if df_f.empty:
+    # Factor columns are everything numeric that is not the rf series
+    # You can tweak this if you have other non-factor numeric columns.
+    factor_cols = []
+    for col in candidate_cols:
+        # Skip clearly non-factor columns if any
+        if col.lower() in ["rf", "rf_daily", "r_3m", "r_1m"]:
             continue
+        if pd.api.types.is_numeric_dtype(df[col]):
+            factor_cols.append(col)
 
-        # Merge risk-free if we have it
-        if use_rf:
-            tmp = df_f.merge(
-                rf_df[["date", "rf_daily"]],
-                on="date",
-                how="left",
-            )
-            # If some rf_daily are missing (for example holidays), fill with the median daily rf
-            median_rf = tmp["rf_daily"].median()
-            tmp["rf_daily"] = tmp["rf_daily"].fillna(median_rf if pd.notna(median_rf) else 0.0)
-            r = tmp["return"].astype(float)
-            rf_daily = tmp["rf_daily"].astype(float)
-        else:
-            r = df_f["return"].astype(float)
-            # Zero risk-free if not provided
-            rf_daily = pd.Series(0.0, index=r.index)
+    if not factor_cols:
+        empty_perf = pd.DataFrame(columns=["factor", "ann_return", "ann_vol", "sharpe", "max_drawdown"])
+        empty_cum = pd.DataFrame()
+        return empty_perf, empty_cum
 
+    ann_factor = 252.0
+    perf_rows = []
+    cum_paths = pd.DataFrame(index=df.index)
+
+    for fac in factor_cols:
+        r = df[fac].dropna()
         if r.empty:
             continue
 
-        # Basic counts and dates
+        # Align rf_daily if available
+        if rf_daily is not None:
+            rf_used = rf_daily.reindex(r.index).fillna(method="ffill").fillna(0.0)
+        else:
+            rf_used = 0.0  # scalar 0
+
         n_days = len(r)
-        start_date = df_f["date"].iloc[0]
-        end_date = df_f["date"].iloc[-1]
 
-        # Cumulative total return (compound)
-        wealth = (1.0 + r).cumprod()
-        total_return = wealth.iloc[-1] - 1.0
+        # Cumulative return path for this factor (gross return path)
+        # (1 + r).cumprod() gives gross, minus 1 gives cumulative simple return
+        cum = (1.0 + r).cumprod() - 1.0
+        cum_paths[fac] = cum
 
-        # Annualized total return based on trading days
+        # Annualized return (simple) from realized path
+        total_return = (1.0 + r).prod() - 1.0
         if n_days > 0:
-            ann_return = (1.0 + total_return) ** (252.0 / n_days) - 1.0
+            ann_return = (1.0 + total_return) ** (ann_factor / n_days) - 1.0
         else:
             ann_return = np.nan
 
-        # Annualized volatility (using population std)
-        daily_vol = r.std(ddof=0)
-        ann_vol = daily_vol * np.sqrt(252.0) if pd.notna(daily_vol) else np.nan
+        # Annualized volatility (using daily std dev)
+        daily_vol = r.std(ddof=1)
+        ann_vol = daily_vol * np.sqrt(ann_factor)
 
-        # Excess returns and Sharpe ratio
-        # Daily excess = r_t - rf_t
-        excess = r - rf_daily
-        # Annualized excess return as mean(excess) * 252
-        ex_ann_return = excess.mean() * 252.0
+        # Sharpe ratio using excess returns vs rf_daily if provided
+        if isinstance(rf_used, pd.Series):
+            excess = r - rf_used
+            excess_mean = excess.mean()
+            excess_std = r.std(ddof=1)  # volatility of total returns as denominator
+        else:
+            # rf_used is scalar 0.0
+            excess_mean = r.mean()
+            excess_std = r.std(ddof=1)
 
-        if ann_vol > 0 and pd.notna(ann_vol):
-            sharpe = ex_ann_return / ann_vol
+        if excess_std > 0:
+            sharpe = excess_mean / excess_std * np.sqrt(ann_factor)
         else:
             sharpe = np.nan
 
-        # Max drawdown: based on wealth series
-        running_max = wealth.cummax()
-        drawdown = wealth / running_max - 1.0
-        max_drawdown = drawdown.min() if not drawdown.empty else np.nan
+        # Max drawdown based on cumulative gross path
+        gross_path = (1.0 + r).cumprod()
+        running_max = gross_path.cummax()
+        drawdown = gross_path / running_max - 1.0
+        max_dd = drawdown.min()  # typically negative
 
-        rows.append(
+        perf_rows.append(
             {
-                "factor": f_name,
-                "start_date": start_date,
-                "end_date": end_date,
-                "n_days": n_days,
-                "total_return_pct": total_return * 100.0,
-                "ann_return_pct": ann_return * 100.0 if pd.notna(ann_return) else np.nan,
-                "ann_excess_return_pct": ex_ann_return * 100.0,
-                "ann_vol_pct": ann_vol * 100.0 if pd.notna(ann_vol) else np.nan,
+                "factor": fac,
+                "ann_return": ann_return,
+                "ann_vol": ann_vol,
                 "sharpe": sharpe,
-                "max_drawdown_pct": max_drawdown * 100.0 if pd.notna(max_drawdown) else np.nan,
+                "max_drawdown": max_dd,
             }
         )
 
-    if not rows:
-        return pd.DataFrame()
+    perf_summary = pd.DataFrame(perf_rows)
 
-    perf = pd.DataFrame(rows)
-    return perf
+    # Optional: sort factors alphabetically or by ann_return
+    perf_summary = perf_summary.sort_values("factor").reset_index(drop=True)
+
+    return perf_summary, cum_paths
+
 
 
 
