@@ -245,7 +245,11 @@ def compute_factor_performance(factor_returns_hist: pd.DataFrame):
     return perf_summary, cum_paths
 
 
-def load_sp500_reference_cache(api_key: str, force_refresh: bool = False) -> pd.DataFrame:
+def load_sp500_reference_cache(
+    api_key: str, 
+    force_refresh: bool = False,
+    show_progress: bool = True
+) -> pd.DataFrame:
     """
     Load the S&P 500 sector reference cache.
     
@@ -255,6 +259,7 @@ def load_sp500_reference_cache(api_key: str, force_refresh: bool = False) -> pd.
     Args:
         api_key: FMP API key
         force_refresh: If True, force a cache refresh
+        show_progress: If True, show a progress bar during cache refresh
     
     Returns:
         DataFrame with S&P 500 factor scores, or empty DataFrame on failure
@@ -266,11 +271,48 @@ def load_sp500_reference_cache(api_key: str, force_refresh: bool = False) -> pd.
         else:
             fetcher = None
         
-        # Get the cached or fresh S&P 500 scores
-        sp500_ref = get_sp500_sector_scores(
-            fetcher=fetcher,
-            force_refresh=force_refresh,
-        )
+        # Check if we need to refresh (will show progress) or just load from cache
+        cache_status = get_cache_status()
+        needs_refresh = force_refresh or cache_status.get("is_stale", True) or not cache_status.get("cache_exists", False)
+        
+        if needs_refresh and show_progress:
+            # Show progress bar during cache refresh
+            progress_container = st.container()
+            with progress_container:
+                st.info("🔄 Building S&P 500 sector benchmark cache. This may take 45-90 minutes on first run...")
+                progress_bar = st.progress(0, text="Initializing...")
+                status_text = st.empty()
+                
+                # Track progress
+                progress_state = {"current": 0, "total": 1, "phase": "init"}
+                
+                def progress_callback(current: int, total: int, message: str):
+                    progress_state["current"] = current
+                    progress_state["total"] = total
+                    progress_state["phase"] = message
+                    
+                    # Calculate progress percentage
+                    pct = min(current / max(total, 1), 1.0)
+                    progress_bar.progress(pct, text=f"{message} ({current}/{total})")
+                    status_text.caption(f"Processing: {message}")
+                
+                # Get the cached or fresh S&P 500 scores with progress callback
+                sp500_ref = get_sp500_sector_scores(
+                    fetcher=fetcher,
+                    force_refresh=force_refresh,
+                    progress_callback=progress_callback,
+                )
+                
+                # Clear progress indicators on completion
+                progress_bar.progress(1.0, text="Complete!")
+                time.sleep(0.5)
+                progress_container.empty()
+        else:
+            # Just load from cache (fast, no progress needed)
+            sp500_ref = get_sp500_sector_scores(
+                fetcher=fetcher,
+                force_refresh=force_refresh,
+            )
         
         return sp500_ref
     
@@ -409,14 +451,14 @@ with st.sidebar:
         if not api_key:
             st.error("Please enter an API key first.")
         else:
-            with st.spinner("Refreshing S&P 500 cache... This may take several minutes."):
-                sp500_ref = load_sp500_reference_cache(api_key, force_refresh=True)
-                if not sp500_ref.empty:
-                    st.session_state["sp500_reference"] = sp500_ref
-                    st.success(f"Cache refreshed with {len(sp500_ref)} stocks!")
-                    st.rerun()
-                else:
-                    st.error("Failed to refresh cache.")
+            # Progress bar will be shown by load_sp500_reference_cache
+            sp500_ref = load_sp500_reference_cache(api_key, force_refresh=True, show_progress=True)
+            if not sp500_ref.empty:
+                st.session_state["sp500_reference"] = sp500_ref
+                st.success(f"Cache refreshed with {len(sp500_ref)} stocks!")
+                st.rerun()
+            else:
+                st.error("Failed to refresh cache.")
 
     st.markdown("---")
     run_btn = st.button("Run pipeline", type="primary")
@@ -448,8 +490,12 @@ if run_btn:
             sp500_reference = cached_ref
             status.success(f"Using cached S&P 500 benchmark ({len(sp500_reference)} stocks)")
         else:
-            # Load or refresh the cache
-            sp500_reference = load_sp500_reference_cache(api_key, force_refresh=False)
+            # Load or refresh the cache (with progress bar if needed)
+            sp500_reference = load_sp500_reference_cache(
+                api_key, 
+                force_refresh=False, 
+                show_progress=True
+            )
             
             if not sp500_reference.empty:
                 st.session_state["sp500_reference"] = sp500_reference
