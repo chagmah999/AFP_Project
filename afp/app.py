@@ -27,6 +27,10 @@ from afp_app.sector_cache import (
     get_sp500_sector_scores,
     get_cache_status,
     clear_cache as clear_sp500_cache,
+    clear_fundamentals_cache,
+    clear_prices_cache,
+    FUNDAMENTALS_REFRESH_DAYS,
+    PRICES_REFRESH_DAYS,
 )
 
 
@@ -248,6 +252,7 @@ def compute_factor_performance(factor_returns_hist: pd.DataFrame):
 def load_sp500_reference_cache(
     api_key: str, 
     force_refresh: bool = False,
+    force_refresh_prices: bool = False,
     show_progress: bool = True
 ) -> pd.DataFrame:
     """
@@ -258,7 +263,8 @@ def load_sp500_reference_cache(
     
     Args:
         api_key: FMP API key
-        force_refresh: If True, force a cache refresh
+        force_refresh: If True, force a cache refresh of both fundamentals and prices
+        force_refresh_prices: If True, force refresh prices only
         show_progress: If True, show a progress bar during cache refresh
     
     Returns:
@@ -273,24 +279,36 @@ def load_sp500_reference_cache(
         
         # Check if we need to refresh (will show progress) or just load from cache
         cache_status = get_cache_status()
-        needs_refresh = force_refresh or cache_status.get("is_stale", True) or not cache_status.get("cache_exists", False)
+        needs_refresh = (
+            force_refresh or 
+            force_refresh_prices or
+            cache_status.get("is_stale", True) or 
+            not cache_status.get("cache_exists", False)
+        )
         
         if needs_refresh and show_progress:
+            # Determine what's being refreshed for the message
+            if force_refresh:
+                refresh_msg = "fundamentals (monthly) and prices (weekly)"
+            elif force_refresh_prices:
+                refresh_msg = "prices (weekly)"
+            elif cache_status.get("fundamentals_is_stale") and cache_status.get("prices_is_stale"):
+                refresh_msg = "fundamentals (monthly) and prices (weekly)"
+            elif cache_status.get("fundamentals_is_stale"):
+                refresh_msg = "fundamentals (monthly)"
+            elif cache_status.get("prices_is_stale"):
+                refresh_msg = "prices (weekly)"
+            else:
+                refresh_msg = "cache"
+            
             # Show progress bar during cache refresh
             progress_container = st.container()
             with progress_container:
-                st.info("🔄 Building S&P 500 sector benchmark cache. This may take 45-90 minutes on first run...")
+                st.info(f"🔄 Refreshing S&P 500 {refresh_msg}...")
                 progress_bar = st.progress(0, text="Initializing...")
                 status_text = st.empty()
                 
-                # Track progress
-                progress_state = {"current": 0, "total": 1, "phase": "init"}
-                
                 def progress_callback(current: int, total: int, message: str):
-                    progress_state["current"] = current
-                    progress_state["total"] = total
-                    progress_state["phase"] = message
-                    
                     # Calculate progress percentage
                     pct = min(current / max(total, 1), 1.0)
                     progress_bar.progress(pct, text=f"{message} ({current}/{total})")
@@ -300,6 +318,7 @@ def load_sp500_reference_cache(
                 sp500_ref = get_sp500_sector_scores(
                     fetcher=fetcher,
                     force_refresh=force_refresh,
+                    force_refresh_prices=force_refresh_prices,
                     progress_callback=progress_callback,
                 )
                 
@@ -312,6 +331,7 @@ def load_sp500_reference_cache(
             sp500_ref = get_sp500_sector_scores(
                 fetcher=fetcher,
                 force_refresh=force_refresh,
+                force_refresh_prices=force_refresh_prices,
             )
         
         return sp500_ref
@@ -402,21 +422,30 @@ with st.sidebar:
     cache_status = get_cache_status()
     st.session_state["sp500_cache_status"] = cache_status
     
-    if cache_status.get("cache_exists"):
-        last_updated = cache_status.get("last_updated", "Unknown")
-        ticker_count = cache_status.get("ticker_count", 0)
-        is_stale = cache_status.get("is_stale", True)
-        
-        status_icon = "✅" if not is_stale else "⚠️"
-        st.caption(
-            f"{status_icon} Cache: {ticker_count} stocks\n\n"
-            f"Last updated: {last_updated[:19] if last_updated else 'Unknown'}"
-        )
-        
-        if is_stale:
-            st.caption("Cache is stale and will refresh on next run.")
+    # Fundamentals cache status
+    if cache_status.get("fundamentals_exists"):
+        fund_updated = cache_status.get("fundamentals_last_updated", "Unknown")
+        fund_stale = cache_status.get("fundamentals_is_stale", True)
+        fund_icon = "✅" if not fund_stale else "⚠️"
+        fund_date = fund_updated[:10] if fund_updated else "Unknown"
+        st.caption(f"{fund_icon} Fundamentals: {fund_date} (monthly)")
     else:
-        st.caption("⚠️ No S&P 500 cache found. Will be created on first run.")
+        st.caption("⚠️ Fundamentals: Not cached")
+    
+    # Prices cache status
+    if cache_status.get("prices_exists"):
+        prices_updated = cache_status.get("prices_last_updated", "Unknown")
+        prices_stale = cache_status.get("prices_is_stale", True)
+        prices_icon = "✅" if not prices_stale else "⚠️"
+        prices_date = prices_updated[:10] if prices_updated else "Unknown"
+        st.caption(f"{prices_icon} Prices: {prices_date} (weekly)")
+    else:
+        st.caption("⚠️ Prices: Not cached")
+    
+    # Show ticker count
+    ticker_count = cache_status.get("fundamentals_ticker_count", 0)
+    if ticker_count > 0:
+        st.caption(f"📊 {ticker_count} S&P 500 stocks cached")
     
     # Option to use sector-relative scoring
     use_sector_relative = st.checkbox(
@@ -426,18 +455,15 @@ with st.sidebar:
              "in the same sector. If disabled, scores are relative to the selected universe only."
     )
     
-    # Button to force refresh the cache
-    col1, col2 = st.columns(2)
+    # Refresh buttons
+    st.caption("Refresh cache:")
+    col1, col2, col3 = st.columns(3)
     with col1:
-        refresh_cache_btn = st.button(
-            "Refresh Cache",
-            help="Force refresh the S&P 500 sector benchmark cache",
-        )
+        refresh_all_btn = st.button("All", help="Refresh both fundamentals and prices")
     with col2:
-        clear_cache_btn = st.button(
-            "Clear Cache",
-            help="Delete the cached S&P 500 data",
-        )
+        refresh_prices_btn = st.button("Prices", help="Refresh prices only (weekly)")
+    with col3:
+        clear_cache_btn = st.button("Clear", help="Delete all cached data")
     
     if clear_cache_btn:
         if clear_sp500_cache():
@@ -447,7 +473,7 @@ with st.sidebar:
         else:
             st.error("Failed to clear cache.")
     
-    if refresh_cache_btn:
+    if refresh_all_btn:
         if not api_key:
             st.error("Please enter an API key first.")
         else:
@@ -459,6 +485,24 @@ with st.sidebar:
                 st.rerun()
             else:
                 st.error("Failed to refresh cache.")
+    
+    if refresh_prices_btn:
+        if not api_key:
+            st.error("Please enter an API key first.")
+        else:
+            # Refresh only prices
+            sp500_ref = load_sp500_reference_cache(
+                api_key, 
+                force_refresh=False, 
+                force_refresh_prices=True,
+                show_progress=True
+            )
+            if not sp500_ref.empty:
+                st.session_state["sp500_reference"] = sp500_ref
+                st.success(f"Prices cache refreshed!")
+                st.rerun()
+            else:
+                st.error("Failed to refresh prices cache.")
 
     st.markdown("---")
     run_btn = st.button("Run pipeline", type="primary")
@@ -988,13 +1032,26 @@ else:
             # Show S&P 500 cache info
             if cache_status:
                 with st.expander("S&P 500 Benchmark Cache Info"):
-                    st.json({
-                        "cache_exists": cache_status.get("cache_exists", False),
-                        "last_updated": cache_status.get("last_updated", "Unknown"),
-                        "ticker_count": cache_status.get("ticker_count", 0),
-                        "sectors": cache_status.get("sectors", []),
-                        "is_stale": cache_status.get("is_stale", True),
-                    })
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.markdown("**Fundamentals Cache**")
+                        st.write(f"- Exists: {cache_status.get('fundamentals_exists', False)}")
+                        st.write(f"- Last updated: {cache_status.get('fundamentals_last_updated', 'Never')[:10] if cache_status.get('fundamentals_last_updated') else 'Never'}")
+                        st.write(f"- Stocks: {cache_status.get('fundamentals_ticker_count', 0)}")
+                        st.write(f"- Refresh cycle: {cache_status.get('fundamentals_refresh_days', 30)} days")
+                        st.write(f"- Stale: {cache_status.get('fundamentals_is_stale', True)}")
+                    with col2:
+                        st.markdown("**Prices Cache**")
+                        st.write(f"- Exists: {cache_status.get('prices_exists', False)}")
+                        st.write(f"- Last updated: {cache_status.get('prices_last_updated', 'Never')[:10] if cache_status.get('prices_last_updated') else 'Never'}")
+                        st.write(f"- Stocks: {cache_status.get('prices_ticker_count', 0)}")
+                        st.write(f"- Refresh cycle: {cache_status.get('prices_refresh_days', 7)} days")
+                        st.write(f"- Stale: {cache_status.get('prices_is_stale', True)}")
+                    
+                    st.markdown("**Sectors in cache:**")
+                    sectors = cache_status.get("fundamentals_sectors", [])
+                    if sectors:
+                        st.write(", ".join(sorted(sectors)))
 
     st.subheader("Optimized unified portfolio")
 
