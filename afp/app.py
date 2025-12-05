@@ -23,9 +23,6 @@ from afp_app.engine import MarketMancerEngine
 from afp_app.optimizer import UnifiedPortfolioOptimizer
 
 
-# =============================================================================
-# Helper: compute factor performance stats from historical factor returns
-# =============================================================================
 def compute_factor_performance(factor_returns_hist: pd.DataFrame):
     """
     Compute performance statistics and cumulative return paths
@@ -35,6 +32,14 @@ def compute_factor_performance(factor_returns_hist: pd.DataFrame):
       1) Long format with columns ['date','factor','return', ...], or
       2) Wide format with a date index (or 'date' column) and one
          numeric column per factor (plus optional 'rf_daily').
+
+    Expected columns in long format:
+      - 'date': calendar date of the factor return
+      - 'factor': factor name (e.g. 'VALUE', 'QUALITY', ...)
+      - 'return': daily factor return in decimals
+      - optional 'rf_daily': daily risk free rate in decimals
+        (if present, it can either be repeated per factor row or
+         stored in a separate row; it will be aligned by date)
 
     Returns
     -------
@@ -71,6 +76,7 @@ def compute_factor_performance(factor_returns_hist: pd.DataFrame):
 
         # Pull out risk free if present
         if "rf_daily" in df.columns:
+            # Take one rf value per date (mean across rows if repeated)
             rf_daily = (
                 df[["date", "rf_daily"]]
                 .dropna()
@@ -232,112 +238,6 @@ def compute_factor_performance(factor_returns_hist: pd.DataFrame):
     return perf_summary, cum_paths
 
 
-# =============================================================================
-# Helper: daily cached S&P 500 factor metrics
-# =============================================================================
-
-CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
-
-
-def _get_latest_sp500_metrics_from_cache() -> pd.DataFrame | None:
-    """
-    Look for any existing sp500_factor_metrics_YYYYMMDD.parquet in CACHE_DIR.
-    Return the most recent one if available, else None.
-    """
-    if not os.path.isdir(CACHE_DIR):
-        return None
-
-    files = [
-        f
-        for f in os.listdir(CACHE_DIR)
-        if f.startswith("sp500_factor_metrics_") and f.endswith(".parquet")
-    ]
-    if not files:
-        return None
-
-    latest = sorted(files)[-1]
-    path = os.path.join(CACHE_DIR, latest)
-    try:
-        return pd.read_parquet(path)
-    except Exception:
-        return None
-
-
-def load_or_build_sp500_metrics(fetcher: FMPDataFetcher, start_date: str) -> pd.DataFrame:
-    """
-    Load S&P 500-wide factor metrics (sector-neutral value_score, quality_score, etc.)
-    from a daily cache if present; otherwise fetch all S&P 500 data, build the metrics
-    once for the day, cache to disk, and return.
-
-    The metrics are computed using calculate_factor_metrics over the *full* S&P 500
-    cross section, so percentile ranks are within-sector over the entire S&P 500, not
-    just the small universe chosen in the app.
-    """
-    os.makedirs(CACHE_DIR, exist_ok=True)
-
-    today_str = pd.Timestamp.today().strftime("%Y%m%d")
-    cache_file = f"sp500_factor_metrics_{today_str}.parquet"
-    cache_path = os.path.join(CACHE_DIR, cache_file)
-
-    # 1. If today's cache file exists, just load and return it.
-    if os.path.exists(cache_path):
-        try:
-            return pd.read_parquet(cache_path)
-        except Exception:
-            # Fall back to "latest available" if this one is corrupted
-            cached = _get_latest_sp500_metrics_from_cache()
-            if cached is not None:
-                return cached
-
-    # 2. If no cache for today, try to build from scratch
-    try:
-        const_df = fetcher.get_sp500_constituents()
-        if not isinstance(const_df, pd.DataFrame) or "symbol" not in const_df.columns:
-            # If we cannot get a clean S&P 500 constituent list, fall back to any
-            # previously cached metrics.
-            cached = _get_latest_sp500_metrics_from_cache()
-            if cached is not None:
-                return cached
-            return pd.DataFrame()
-
-        all_tickers = sorted(const_df["symbol"].dropna().unique().tolist())
-        if not all_tickers:
-            cached = _get_latest_sp500_metrics_from_cache()
-            if cached is not None:
-                return cached
-            return pd.DataFrame()
-
-        # Fetch fundamentals and prices for the *full* S&P 500 list once
-        fundamentals_full = collect_fundamental_data(all_tickers, start_date, fetcher)
-        prices_full = collect_price_data(all_tickers, start_date, None, fetcher)
-
-        metrics_full = calculate_factor_metrics(fundamentals_full, prices_full)
-        if isinstance(metrics_full, pd.DataFrame) and not metrics_full.empty:
-            try:
-                metrics_full.to_parquet(cache_path, index=False)
-            except Exception:
-                # If we cannot write, at least return the in-memory result
-                pass
-            return metrics_full
-
-        # If metrics_full came back empty, try prior cache as a fallback.
-        cached = _get_latest_sp500_metrics_from_cache()
-        if cached is not None:
-            return cached
-        return pd.DataFrame()
-
-    except Exception:
-        # Any error talking to FMP: fall back to most recent cache if available.
-        cached = _get_latest_sp500_metrics_from_cache()
-        if cached is not None:
-            return cached
-        return pd.DataFrame()
-
-
-# =============================================================================
-# Streamlit layout and main pipeline
-# =============================================================================
-
 st.set_page_config(page_title="AFP Forecasting Tool", layout="wide")
 
 st.title("AFP Forecasting Tool")
@@ -428,21 +328,11 @@ if run_btn:
         randomize=randomize,
         seed=int(seed),
     )
+
     st.session_state["universe_tickers"] = tickers
 
-    # -------------------------------------------------------------------------
-    # Build or load full S&P 500 factor metrics (once per day via cache)
-    # -------------------------------------------------------------------------
+    status.info("Fetching fundamentals and prices...")
     fetcher = FMPDataFetcher(api_key=api_key)
-
-    status.info("Loading or building S&P 500-wide factor metrics (daily cache)...")
-    metrics_full = load_or_build_sp500_metrics(fetcher, start_date)
-
-    # -------------------------------------------------------------------------
-    # Fetch fundamentals and prices only for the selected universe
-    # (small, fast fetch each run)
-    # -------------------------------------------------------------------------
-    status.info("Fetching fundamentals and prices for selected universe...")
     fundamentals = collect_fundamental_data(tickers, start_date, fetcher)
     prices = collect_price_data(tickers, start_date, None, fetcher)
 
@@ -456,29 +346,14 @@ if run_btn:
     )
 
     status.info("Computing factor scores and factor returns...")
-
-    # Use S&P 500-wide metrics for scoring, then restrict to selected universe
-    if (
-        metrics_full is None
-        or not isinstance(metrics_full, pd.DataFrame)
-        or metrics_full.empty
-    ):
-        metrics = pd.DataFrame()
-    else:
-        metrics = metrics_full[metrics_full["ticker"].isin(tickers)].copy()
+    metrics = calculate_factor_metrics(fundamentals, prices)
 
     factor_returns = pd.DataFrame()
     if metrics.empty:
-        st.warning(
-            "No factor metrics available. "
-            "This can happen if S&P 500 metrics could not be built or cached."
-        )
+        st.warning("No factor metrics available. Check fundamentals coverage.")
         st.session_state["factor_portfolio_sizes"] = None
         st.session_state["sample_factor_scores"] = None
     else:
-        # Factor portfolios and returns are built only on the selected universe,
-        # but their scores (value_score, quality_score, etc.) were computed using
-        # the full S&P 500 sector/industry cross section.
         ctor = FactorPortfolioConstructor(metrics, prices)
         portfolios = ctor.construct_all()
 
@@ -492,7 +367,6 @@ if run_btn:
             prices["date"].max().strftime("%Y-%m-%d"),
         )
 
-        # For the display table, show scores for the selected tickers.
         latest = (
             metrics.sort_values("date")
             .groupby("ticker")
@@ -631,10 +505,6 @@ if run_btn:
 
     t1 = time.time()
     st.success(f"Pipeline completed in {t1 - t0:.1f} seconds.")
-
-# =============================================================================
-# Display sections
-# =============================================================================
 
 forecasts = st.session_state.get("base_forecasts")
 alpha_preds = st.session_state.get("base_alpha")
