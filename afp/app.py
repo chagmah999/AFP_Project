@@ -22,91 +22,155 @@ from afp_app.signal_alpha import AlphaPredictor
 from afp_app.engine import MarketMancerEngine
 from afp_app.optimizer import UnifiedPortfolioOptimizer
 
-def compute_factor_performance(factor_returns: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Compute historical performance metrics and cumulative return paths
-    for each factor in the factor_returns DataFrame.
+import numpy as np
+import pandas as pd
 
-    factor_returns is expected to have columns: ['date', 'factor', 'return'].
-    Returns:
-      - summary_df: one row per factor with performance metrics
-      - cumret_df: wide DataFrame of cumulative returns by date and factor
+def compute_factor_performance(
+    factor_returns: pd.DataFrame,
+    macro_frame: pd.DataFrame | None = None,
+    rf_col: str = "R_3M",
+) -> pd.DataFrame:
     """
+    Compute historical performance statistics for each factor portfolio.
+
+    Inputs
+    ------
+    factor_returns : DataFrame
+        Long-format factor returns with columns:
+            - 'date'   : pandas.Timestamp or datetime-like
+            - 'factor' : factor name (e.g. 'VALUE', 'QUALITY', 'MOMENTUM', 'LOW_VOL')
+            - 'return' : daily factor return in decimal form (0.01 = 1%)
+
+    macro_frame : DataFrame or None
+        Optional macro data with at least:
+            - 'date'
+            - rf_col (for example 'R_3M'), which is a daily risk-free rate in percent
+              (for example 4.5 means 4.5 percent per year)
+
+        If provided and rf_col is present, Sharpe ratios are computed using
+        *excess returns* over this risk-free rate. If not, the risk-free rate
+        is treated as zero.
+
+    rf_col : str
+        Column name in macro_frame that contains the annualized risk-free rate
+        in percent (for example 3-month Treasury yield).
+
+    Output
+    ------
+    perf : DataFrame
+        One row per factor with columns:
+            - factor
+            - start_date
+            - end_date
+            - n_days
+            - total_return_pct
+            - ann_return_pct
+            - ann_excess_return_pct
+            - ann_vol_pct
+            - sharpe
+            - max_drawdown_pct
+    """
+
     if factor_returns is None or factor_returns.empty:
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame()
 
-    # Ensure proper types and ordering
-    df = factor_returns.copy()
-    df = df.dropna(subset=["return"])
-    df = df.sort_values("date")
+    # Ensure date is datetime
+    factor_returns = factor_returns.copy()
+    factor_returns["date"] = pd.to_datetime(factor_returns["date"])
 
-    metrics_rows = []
-    cum_paths = []
+    # Prepare risk-free series if available
+    use_rf = False
+    rf_df = None
+    if macro_frame is not None and rf_col in macro_frame.columns:
+        rf_df = macro_frame[["date", rf_col]].copy()
+        rf_df["date"] = pd.to_datetime(rf_df["date"])
+        # Convert from percent to daily decimal rate
+        # Example: R_3M = 4.5 -> annual 0.045 -> daily approx 0.045 / 252
+        rf_df["rf_daily"] = (rf_df[rf_col] / 100.0) / 252.0
+        use_rf = True
 
-    for fname, grp in df.groupby("factor"):
-        grp = grp.sort_values("date")
-        r = grp["return"].astype(float).dropna()
-        if len(r) < 2:
+    rows = []
+    for f_name, df_f in factor_returns.groupby("factor"):
+        df_f = df_f.sort_values("date").copy()
+        if df_f.empty:
             continue
 
-        dates = grp.loc[r.index, "date"]
-        # Cumulative simple return path
-        cum = (1.0 + r).cumprod()
-        cum_paths.append(
-            pd.DataFrame(
-                {
-                    "date": dates.values,
-                    fname: cum.values,
-                }
+        # Merge risk-free if we have it
+        if use_rf:
+            tmp = df_f.merge(
+                rf_df[["date", "rf_daily"]],
+                on="date",
+                how="left",
             )
-        )
+            # If some rf_daily are missing (for example holidays), fill with the median daily rf
+            median_rf = tmp["rf_daily"].median()
+            tmp["rf_daily"] = tmp["rf_daily"].fillna(median_rf if pd.notna(median_rf) else 0.0)
+            r = tmp["return"].astype(float)
+            rf_daily = tmp["rf_daily"].astype(float)
+        else:
+            r = df_f["return"].astype(float)
+            # Zero risk-free if not provided
+            rf_daily = pd.Series(0.0, index=r.index)
 
+        if r.empty:
+            continue
+
+        # Basic counts and dates
         n_days = len(r)
-        total_return = cum.iloc[-1] - 1.0
+        start_date = df_f["date"].iloc[0]
+        end_date = df_f["date"].iloc[-1]
 
-        # Annualized return from total return over n_days
-        ann_return = (1.0 + total_return) ** (252.0 / n_days) - 1.0
+        # Cumulative total return (compound)
+        wealth = (1.0 + r).cumprod()
+        total_return = wealth.iloc[-1] - 1.0
 
-        # Annualized volatility from daily volatility
-        daily_vol = float(r.std(ddof=0))
-        ann_vol = daily_vol * np.sqrt(252.0) if daily_vol > 0 else np.nan
+        # Annualized total return based on trading days
+        if n_days > 0:
+            ann_return = (1.0 + total_return) ** (252.0 / n_days) - 1.0
+        else:
+            ann_return = np.nan
 
-        sharpe = ann_return / ann_vol if ann_vol and ann_vol > 0 else np.nan
+        # Annualized volatility (using population std)
+        daily_vol = r.std(ddof=0)
+        ann_vol = daily_vol * np.sqrt(252.0) if pd.notna(daily_vol) else np.nan
 
-        # Max drawdown from cumulative path
-        running_max = cum.cummax()
-        drawdown = cum / running_max - 1.0
-        max_dd = drawdown.min()
+        # Excess returns and Sharpe ratio
+        # Daily excess = r_t - rf_t
+        excess = r - rf_daily
+        # Annualized excess return as mean(excess) * 252
+        ex_ann_return = excess.mean() * 252.0
 
-        metrics_rows.append(
+        if ann_vol > 0 and pd.notna(ann_vol):
+            sharpe = ex_ann_return / ann_vol
+        else:
+            sharpe = np.nan
+
+        # Max drawdown: based on wealth series
+        running_max = wealth.cummax()
+        drawdown = wealth / running_max - 1.0
+        max_drawdown = drawdown.min() if not drawdown.empty else np.nan
+
+        rows.append(
             {
-                "Factor": fname,
-                "Start date": dates.min(),
-                "End date": dates.max(),
-                "Total return %": total_return * 100.0,
-                "Annualized return %": ann_return * 100.0,
-                "Annualized volatility %": ann_vol * 100.0,
-                "Sharpe (rf = 0)": sharpe,
-                "Max drawdown %": max_dd * 100.0,
-                "Number of days": n_days,
+                "factor": f_name,
+                "start_date": start_date,
+                "end_date": end_date,
+                "n_days": n_days,
+                "total_return_pct": total_return * 100.0,
+                "ann_return_pct": ann_return * 100.0 if pd.notna(ann_return) else np.nan,
+                "ann_excess_return_pct": ex_ann_return * 100.0,
+                "ann_vol_pct": ann_vol * 100.0 if pd.notna(ann_vol) else np.nan,
+                "sharpe": sharpe,
+                "max_drawdown_pct": max_drawdown * 100.0 if pd.notna(max_drawdown) else np.nan,
             }
         )
 
-    if not metrics_rows:
-        return pd.DataFrame(), pd.DataFrame()
+    if not rows:
+        return pd.DataFrame()
 
-    summary_df = pd.DataFrame(metrics_rows).sort_values("Factor")
+    perf = pd.DataFrame(rows)
+    return perf
 
-    # Build a wide cumulative return table for plotting
-    if cum_paths:
-        cumret_df = cum_paths[0]
-        for extra in cum_paths[1:]:
-            cumret_df = cumret_df.merge(extra, on="date", how="outer")
-        cumret_df = cumret_df.sort_values("date")
-    else:
-        cumret_df = pd.DataFrame()
-
-    return summary_df, cumret_df
 
 
 
