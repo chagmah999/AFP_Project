@@ -409,7 +409,7 @@ if run_btn:
             .last()
             .reset_index()
         )
-    
+        
         score_cols = [
             c
             for c in [
@@ -420,11 +420,17 @@ if run_btn:
             ]
             if c in latest.columns
         ]
-    
+        
+        extra_cols = []
+        for extra in ["sector", "industry", "sector_peer_count", "industry_peer_count"]:
+            if extra in latest.columns:
+                extra_cols.append(extra)
+        
         if score_cols:
-            sample = latest[["ticker"] + score_cols].sort_values("ticker")
+            sample = latest[["ticker"] + score_cols + extra_cols].sort_values("ticker")
         else:
             sample = None
+
     
         st.session_state["factor_portfolio_sizes"] = port_sizes
         st.session_state["sample_factor_scores"] = sample
