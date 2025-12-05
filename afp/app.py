@@ -332,33 +332,9 @@ if run_btn:
     st.session_state["universe_tickers"] = tickers
 
     status.info("Fetching fundamentals and prices...")
-
     fetcher = FMPDataFetcher(api_key=api_key)
-    
-    # 1) Get the full current S&P 500 universe from FMP
-    try:
-        sp500_const = fetcher.get_sp500_constituents()
-        all_tickers = sorted(sp500_const["symbol"].dropna().unique().tolist())
-    except Exception:
-        # Fallback: if the API call fails, just use the selected universe
-        # (behavior matches the old version in a degraded way)
-        all_tickers = tickers
-    
-    # 2) Collect data for the *full* S&P 500 list
-    fundamentals_full = collect_fundamental_data(all_tickers, start_date, fetcher)
-    prices_full = collect_price_data(all_tickers, start_date, None, fetcher)
-    
-    # 3) Restrict to the user-selected universe for the rest of the pipeline
-    if fundamentals_full is not None and isinstance(fundamentals_full, pd.DataFrame):
-        fundamentals = fundamentals_full[fundamentals_full["ticker"].isin(tickers)].copy()
-    else:
-        fundamentals = fundamentals_full
-    
-    if prices_full is not None and isinstance(prices_full, pd.DataFrame):
-        prices = prices_full[prices_full["ticker"].isin(tickers)].copy()
-    else:
-        prices = prices_full
-
+    fundamentals = collect_fundamental_data(tickers, start_date, fetcher)
+    prices = collect_price_data(tickers, start_date, None, fetcher)
 
     if prices is None or not isinstance(prices, pd.DataFrame) or prices.empty:
         st.error("No price data returned. Check API key, tickers, or date range.")
@@ -370,46 +346,34 @@ if run_btn:
     )
 
     status.info("Computing factor scores and factor returns...")
+    metrics = calculate_factor_metrics(fundamentals, prices)
 
-    # 1) Compute factor metrics on the *full* S&P 500 universe
-    metrics_full = calculate_factor_metrics(fundamentals_full, prices_full)
-    
-    # 2) Then restrict those metrics to the user-selected universe for
-    #    everything that needs only the chosen tickers
-    if metrics_full is None or not isinstance(metrics_full, pd.DataFrame) or metrics_full.empty:
-        metrics = pd.DataFrame()
-    else:
-        metrics = metrics_full[metrics_full["ticker"].isin(tickers)].copy()
-    
     factor_returns = pd.DataFrame()
     if metrics.empty:
         st.warning("No factor metrics available. Check fundamentals coverage.")
         st.session_state["factor_portfolio_sizes"] = None
         st.session_state["sample_factor_scores"] = None
     else:
-        # Factor portfolios and returns are still built only on the selected universe
         ctor = FactorPortfolioConstructor(metrics, prices)
         portfolios = ctor.construct_all()
-    
+
         port_sizes = {
             k: (0 if v is None or v.empty else len(v))
             for k, v in portfolios.items()
         }
-    
+
         factor_returns = ctor.calculate_factor_returns(
             start_date,
             prices["date"].max().strftime("%Y-%m-%d"),
         )
-    
-        # For the display table, we want scores for the selected tickers
-        # but those scores were computed using the full S&P 500 cross-section.
+
         latest = (
             metrics.sort_values("date")
             .groupby("ticker")
             .last()
             .reset_index()
         )
-    
+
         score_cols = [
             c
             for c in [
@@ -420,21 +384,14 @@ if run_btn:
             ]
             if c in latest.columns
         ]
-    
+
         if score_cols:
             sample = latest[["ticker"] + score_cols].sort_values("ticker")
         else:
             sample = None
-    
+
         st.session_state["factor_portfolio_sizes"] = port_sizes
         st.session_state["sample_factor_scores"] = sample
-    
-    # Store factor return history for backtesting display
-    if isinstance(factor_returns, pd.DataFrame) and not factor_returns.empty:
-        st.session_state["factor_returns"] = factor_returns.copy()
-    else:
-        st.session_state["factor_returns"] = None
-
 
     # Store factor return history for backtesting display
     if isinstance(factor_returns, pd.DataFrame) and not factor_returns.empty:
