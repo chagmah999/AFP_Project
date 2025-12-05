@@ -22,113 +22,169 @@ from afp_app.signal_alpha import AlphaPredictor
 from afp_app.engine import MarketMancerEngine
 from afp_app.optimizer import UnifiedPortfolioOptimizer
 
-import numpy as np
-import pandas as pd
-
 
 def compute_factor_performance(factor_returns_hist: pd.DataFrame):
     """
     Compute performance statistics and cumulative return paths
-    for each factor in factor_returns_hist.
+    for each factor.
 
-    Expected input:
-      - factor_returns_hist: DataFrame with
-          * either a DatetimeIndex or a 'date' column
-          * one column per factor, e.g. 'VALUE', 'QUALITY', 'MOMENTUM', 'LOW_VOL'
-          * optionally an 'rf_daily' column with the daily risk-free rate in decimals
-            (for example, 3M T-bill yield / 252). If not present, rf is assumed to be 0.
+    The input can be either:
+      1) Long format with columns ['date','factor','return', ...], or
+      2) Wide format with a date index (or 'date' column) and one
+         numeric column per factor (plus optional 'rf_daily').
 
-    Returns:
-      - perf_summary: DataFrame with one row per factor and columns:
-          ['factor', 'ann_return', 'ann_vol', 'sharpe', 'max_drawdown']
-      - cum_paths: DataFrame with cumulative return paths (in decimal, not percent)
-          indexed by date, one column per factor
+    Expected columns in long format:
+      - 'date': calendar date of the factor return
+      - 'factor': factor name (e.g. 'VALUE', 'QUALITY', ...)
+      - 'return': daily factor return in decimals
+      - optional 'rf_daily': daily risk free rate in decimals
+        (if present, it can either be repeated per factor row or
+         stored in a separate row; it will be aligned by date)
+
+    Returns
+    -------
+    perf_summary : DataFrame
+        One row per factor with columns:
+        ['factor', 'total_return', 'ann_return', 'ann_vol',
+         'sharpe', 'max_drawdown']
+    cum_paths : DataFrame
+        Cumulative simple return paths (decimal) for each factor,
+        indexed by date, one column per factor.
     """
-    df = factor_returns_hist.copy()
-
-    if df.empty:
+    raw = factor_returns_hist.copy()
+    if raw.empty:
         empty_perf = pd.DataFrame(
-            columns=["factor", "ann_return", "ann_vol", "sharpe", "max_drawdown"]
+            columns=[
+                "factor",
+                "total_return",
+                "ann_return",
+                "ann_vol",
+                "sharpe",
+                "max_drawdown",
+            ]
         )
         empty_cum = pd.DataFrame()
         return empty_perf, empty_cum
 
     # ------------------------------------------------------------------
-    # Helper: ensure we have a clean, unique DatetimeIndex
+    # Case 1: long format ['date','factor','return', ...]
     # ------------------------------------------------------------------
-    def _ensure_datetime_index(d: pd.DataFrame) -> pd.DataFrame:
-        d = d.copy()
+    if {"date", "factor", "return"}.issubset(raw.columns):
+        df = raw.copy()
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df = df[~df["date"].isna()]
 
-        if "date" in d.columns:
-            # Try to use the 'date' column as the index
-            d["date"] = pd.to_datetime(d["date"], errors="coerce")
-            # Drop rows where date could not be parsed
-            d = d[~d["date"].isna()]
-            # Sort and set as index if still present
-            if "date" in d.columns:
-                d = d.sort_values("date").set_index("date")
+        # Pull out risk free if present
+        if "rf_daily" in df.columns:
+            # Take one rf value per date (mean across rows if repeated)
+            rf_daily = (
+                df[["date", "rf_daily"]]
+                .dropna()
+                .groupby("date")["rf_daily"]
+                .mean()
+                .sort_index()
+            )
         else:
-            # Fall back to converting the existing index to datetime
-            if not isinstance(d.index, pd.DatetimeIndex):
-                d.index = pd.to_datetime(d.index, errors="coerce")
-            d = d.sort_index()
-            d = d[~d.index.isna()]
+            rf_daily = None
 
-        # At this point we should have a DatetimeIndex; enforce uniqueness
-        if not d.index.is_unique:
-            # Collapse duplicates (take last row per date)
-            d = d.groupby(d.index).last()
+        # Pivot factor returns to wide: one column per factor
+        wide = (
+            df.pivot_table(
+                index="date",
+                columns="factor",
+                values="return",
+                aggfunc="mean",
+            )
+            .sort_index()
+        )
 
-        return d
+        # Merge risk free back in as a separate column if available
+        if rf_daily is not None:
+            wide["rf_daily"] = rf_daily.reindex(wide.index).ffill()
 
-    df = _ensure_datetime_index(df)
+        wide.index = pd.DatetimeIndex(wide.index)
+        wide = wide[~wide.index.isna()]
 
-    if df.empty:
+    # ------------------------------------------------------------------
+    # Case 2: already wide format
+    # ------------------------------------------------------------------
+    else:
+        df = raw.copy()
+
+        def _ensure_datetime_index(d: pd.DataFrame) -> pd.DataFrame:
+            d = d.copy()
+            if "date" in d.columns:
+                d["date"] = pd.to_datetime(d["date"], errors="coerce")
+                d = d[~d["date"].isna()]
+                d = d.sort_values("date").set_index("date")
+            else:
+                if not isinstance(d.index, pd.DatetimeIndex):
+                    d.index = pd.to_datetime(d.index, errors="coerce")
+                d = d.sort_index()
+                d = d[~d.index.isna()]
+            if not d.index.is_unique:
+                d = d.groupby(d.index).last()
+            return d
+
+        wide = _ensure_datetime_index(df)
+
+    if wide.empty:
         empty_perf = pd.DataFrame(
-            columns=["factor", "ann_return", "ann_vol", "sharpe", "max_drawdown"]
+            columns=[
+                "factor",
+                "total_return",
+                "ann_return",
+                "ann_vol",
+                "sharpe",
+                "max_drawdown",
+            ]
         )
         empty_cum = pd.DataFrame()
         return empty_perf, empty_cum
 
-    # ------------------------------------------------------------------
-    # Identify risk-free and factor columns
-    # ------------------------------------------------------------------
-    if "rf_daily" in df.columns:
-        rf_daily = df["rf_daily"].astype(float)
-        candidate_cols = [c for c in df.columns if c != "rf_daily"]
+    # Identify risk free and factor columns
+    if "rf_daily" in wide.columns:
+        rf_daily = wide["rf_daily"].astype(float)
+        candidate_cols = [c for c in wide.columns if c != "rf_daily"]
     else:
         rf_daily = None
-        candidate_cols = list(df.columns)
+        candidate_cols = list(wide.columns)
 
     factor_cols = []
     for col in candidate_cols:
-        # Skip any obvious rf labels if they somehow sneak in
         if col.lower() in ["rf", "rf_daily", "r_3m", "r_1m"]:
             continue
-        if pd.api.types.is_numeric_dtype(df[col]):
+        if pd.api.types.is_numeric_dtype(wide[col]):
             factor_cols.append(col)
 
     if not factor_cols:
         empty_perf = pd.DataFrame(
-            columns=["factor", "ann_return", "ann_vol", "sharpe", "max_drawdown"]
+            columns=[
+                "factor",
+                "total_return",
+                "ann_return",
+                "ann_vol",
+                "sharpe",
+                "max_drawdown",
+            ]
         )
         empty_cum = pd.DataFrame()
         return empty_perf, empty_cum
 
     ann_factor = 252.0
     perf_rows = []
-    cum_paths = pd.DataFrame(index=df.index)
+    cum_paths = pd.DataFrame(index=wide.index)
 
     for fac in factor_cols:
-        r = df[fac].dropna()
+        r = wide[fac].dropna()
         if r.empty:
             continue
 
         # Align rf_daily to this factor's dates if present
-        if rf_daily is not None:
+        if isinstance(rf_daily, pd.Series):
             rf_used = rf_daily.reindex(r.index).ffill().fillna(0.0)
         else:
-            rf_used = 0.0  # scalar 0 if no rf provided
+            rf_used = 0.0
 
         n_days = len(r)
 
@@ -136,7 +192,7 @@ def compute_factor_performance(factor_returns_hist: pd.DataFrame):
         cum = (1.0 + r).cumprod() - 1.0
         cum_paths[fac] = cum
 
-        # Annualized return from realized total return
+        # Total and annualized return
         total_return = (1.0 + r).prod() - 1.0
         if n_days > 0:
             ann_return = (1.0 + total_return) ** (ann_factor / n_days) - 1.0
@@ -151,7 +207,7 @@ def compute_factor_performance(factor_returns_hist: pd.DataFrame):
         if isinstance(rf_used, pd.Series):
             excess = r - rf_used
             excess_mean = excess.mean()
-            excess_std = r.std(ddof=1)  # use total-return vol as denominator
+            excess_std = r.std(ddof=1)
         else:
             excess_mean = r.mean()
             excess_std = r.std(ddof=1)
@@ -165,11 +221,12 @@ def compute_factor_performance(factor_returns_hist: pd.DataFrame):
         gross_path = (1.0 + r).cumprod()
         running_max = gross_path.cummax()
         drawdown = gross_path / running_max - 1.0
-        max_dd = drawdown.min()  # most negative drawdown
+        max_dd = drawdown.min()
 
         perf_rows.append(
             {
                 "factor": fac,
+                "total_return": total_return,
                 "ann_return": ann_return,
                 "ann_vol": ann_vol,
                 "sharpe": sharpe,
@@ -178,7 +235,6 @@ def compute_factor_performance(factor_returns_hist: pd.DataFrame):
         )
 
     perf_summary = pd.DataFrame(perf_rows).sort_values("factor").reset_index(drop=True)
-
     return perf_summary, cum_paths
 
 
@@ -331,7 +387,6 @@ if run_btn:
 
         if score_cols:
             sample = latest[["ticker"] + score_cols].sort_values("ticker")
-
         else:
             sample = None
 
@@ -478,21 +533,12 @@ else:
                 "and the worst peak to trough drawdown over the period."
             )
 
-            # Format perf_summary in percent terms where appropriate
             perf_display = perf_summary.copy()
-            perf_display["Total return %"] = (
-                (1.0 + perf_display["ann_return"] / 252.0) ** 252.0 - 1.0
-                if "ann_return" in perf_display.columns
-                else np.nan
-            )
-
-            # If you do not want the synthetic "Total return %" column,
-            # you can instead compute and store it directly in compute_factor_performance
-            # and drop this block. For now we keep original columns:
-            perf_display = perf_summary.copy()
-            perf_display["Total return %"] = np.nan
+            perf_display["Total return %"] = perf_display["total_return"] * 100.0
             perf_display["Annualized return %"] = perf_summary["ann_return"] * 100.0
-            perf_display["Annualized volatility %"] = perf_summary["ann_vol"] * 100.0
+            perf_display["Annualized volatility %"] = (
+                perf_summary["ann_vol"] * 100.0
+            )
             perf_display["Sharpe (rf adj)"] = perf_summary["sharpe"]
             perf_display["Max drawdown %"] = perf_summary["max_drawdown"] * 100.0
 
@@ -520,15 +566,12 @@ else:
                 use_container_width=True,
             )
 
-            # Optional cumulative return chart
             if not cum_paths.empty:
                 st.caption(
                     "Cumulative growth of one unit invested in each factor "
                     "long short portfolio over time."
                 )
-                # cum_paths already has a DatetimeIndex
-                cum_display = cum_paths.copy()
-                st.line_chart(cum_display)
+                st.line_chart(cum_paths)
     else:
         st.info(
             "No historical factor returns are available yet. "
@@ -706,7 +749,7 @@ else:
             st.json(port_sizes)
 
         if isinstance(sample_scores, pd.DataFrame) and not sample_scores.empty:
-            st.markdown("**Stock-level, sector-adjusted factor scores (0-1 scale)**")
+            st.markdown("**Stock-level, sector-adjusted factor scores (0 to 1)**")
             st.dataframe(sample_scores, use_container_width=True)
 
     st.subheader("Optimized unified portfolio")
