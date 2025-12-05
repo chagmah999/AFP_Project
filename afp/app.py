@@ -22,6 +22,93 @@ from afp_app.signal_alpha import AlphaPredictor
 from afp_app.engine import MarketMancerEngine
 from afp_app.optimizer import UnifiedPortfolioOptimizer
 
+def compute_factor_performance(factor_returns: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Compute historical performance metrics and cumulative return paths
+    for each factor in the factor_returns DataFrame.
+
+    factor_returns is expected to have columns: ['date', 'factor', 'return'].
+    Returns:
+      - summary_df: one row per factor with performance metrics
+      - cumret_df: wide DataFrame of cumulative returns by date and factor
+    """
+    if factor_returns is None or factor_returns.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    # Ensure proper types and ordering
+    df = factor_returns.copy()
+    df = df.dropna(subset=["return"])
+    df = df.sort_values("date")
+
+    metrics_rows = []
+    cum_paths = []
+
+    for fname, grp in df.groupby("factor"):
+        grp = grp.sort_values("date")
+        r = grp["return"].astype(float).dropna()
+        if len(r) < 2:
+            continue
+
+        dates = grp.loc[r.index, "date"]
+        # Cumulative simple return path
+        cum = (1.0 + r).cumprod()
+        cum_paths.append(
+            pd.DataFrame(
+                {
+                    "date": dates.values,
+                    fname: cum.values,
+                }
+            )
+        )
+
+        n_days = len(r)
+        total_return = cum.iloc[-1] - 1.0
+
+        # Annualized return from total return over n_days
+        ann_return = (1.0 + total_return) ** (252.0 / n_days) - 1.0
+
+        # Annualized volatility from daily volatility
+        daily_vol = float(r.std(ddof=0))
+        ann_vol = daily_vol * np.sqrt(252.0) if daily_vol > 0 else np.nan
+
+        sharpe = ann_return / ann_vol if ann_vol and ann_vol > 0 else np.nan
+
+        # Max drawdown from cumulative path
+        running_max = cum.cummax()
+        drawdown = cum / running_max - 1.0
+        max_dd = drawdown.min()
+
+        metrics_rows.append(
+            {
+                "Factor": fname,
+                "Start date": dates.min(),
+                "End date": dates.max(),
+                "Total return %": total_return * 100.0,
+                "Annualized return %": ann_return * 100.0,
+                "Annualized volatility %": ann_vol * 100.0,
+                "Sharpe (rf = 0)": sharpe,
+                "Max drawdown %": max_dd * 100.0,
+                "Number of days": n_days,
+            }
+        )
+
+    if not metrics_rows:
+        return pd.DataFrame(), pd.DataFrame()
+
+    summary_df = pd.DataFrame(metrics_rows).sort_values("Factor")
+
+    # Build a wide cumulative return table for plotting
+    if cum_paths:
+        cumret_df = cum_paths[0]
+        for extra in cum_paths[1:]:
+            cumret_df = cumret_df.merge(extra, on="date", how="outer")
+        cumret_df = cumret_df.sort_values("date")
+    else:
+        cumret_df = pd.DataFrame()
+
+    return summary_df, cumret_df
+
+
 
 st.set_page_config(page_title="AFP Forecasting Tool", layout="wide")
 
@@ -39,6 +126,8 @@ for key, default in [
     ("sample_factor_scores", None),
     ("optimized_portfolio", None),
     ("portfolio_horizon", None),
+    ("factor_returns", None),
+
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -178,6 +267,13 @@ if run_btn:
         st.session_state["factor_portfolio_sizes"] = port_sizes
         st.session_state["sample_factor_scores"] = sample
 
+        # Store factor return history for backtesting display
+    if isinstance(factor_returns, pd.DataFrame) and not factor_returns.empty:
+        st.session_state["factor_returns"] = factor_returns.copy()
+    else:
+        st.session_state["factor_returns"] = None
+
+
     status.info("Fetching macro data...")
     m = MacroDataFetcher(api_key=api_key)
     macro = {
@@ -292,6 +388,58 @@ factor_eval = st.session_state.get("base_factor_eval")
 if not forecasts and not alpha_preds:
     st.info("Run the pipeline from the sidebar to generate forecasts.")
 else:
+    # =========================================================
+    # 0. Historical factor performance (backtest)
+    # =========================================================
+    factor_returns_hist = st.session_state.get("factor_returns")
+
+    if isinstance(factor_returns_hist, pd.DataFrame) and not factor_returns_hist.empty:
+        perf_summary, cum_paths = compute_factor_performance(factor_returns_hist)
+
+        if not perf_summary.empty:
+            st.subheader("Historical factor performance")
+
+            st.caption(
+                "This section summarizes how each long–short factor portfolio "
+                "has performed over the full sample used in the model. "
+                "For each factor, we show total and annualized returns, "
+                "annualized volatility, a simple Sharpe ratio using zero risk free, "
+                "and the worst peak–to–trough drawdown over the period."
+            )
+
+            st.dataframe(
+                perf_summary.style.format(
+                    {
+                        "Total return %": "{:.2f}",
+                        "Annualized return %": "{:.2f}",
+                        "Annualized volatility %": "{:.2f}",
+                        "Sharpe (rf = 0)": "{:.2f}",
+                        "Max drawdown %": "{:.2f}",
+                    }
+                ),
+                use_container_width=True,
+            )
+
+            # Optional cumulative return chart
+            if not cum_paths.empty:
+                st.caption(
+                    "Cumulative growth of one unit invested in each factor "
+                    "long–short portfolio over time."
+                )
+                cum_display = cum_paths.set_index("date")
+                st.line_chart(cum_display)
+    else:
+        st.info(
+            "No historical factor returns are available yet. "
+            "Run the pipeline to compute factor portfolios and their return history."
+        )
+
+    # =========================================================
+    # 1. Factor premia forecasts (first, core view)
+    # =========================================================
+    st.subheader("Factor premia forecasts")
+    ...
+
     st.subheader("Factor premia forecasts")
 
     if forecasts:
