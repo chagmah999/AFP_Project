@@ -437,9 +437,7 @@ else:
     # =========================================================
     # 1. Factor premia forecasts (first, core view)
     # =========================================================
-    st.subheader("Factor premia forecasts")
-    ...
-
+    
     st.subheader("Factor premia forecasts")
 
     if forecasts:
