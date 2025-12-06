@@ -25,10 +25,7 @@ class MacroDataFetcher:
 
 
     def fetch_treasury_rates(self, from_date: str = "2022-01-01", to_date: str | None = None) -> pd.DataFrame:
-        """
-        Fetch U.S. Treasury rates from FMP stable endpoint with robust numeric handling.
-        Computes term spreads and a simple average 'rates_level'.
-        """
+    
         if to_date is None:
             to_date = datetime.now().strftime("%Y-%m-%d")
 
