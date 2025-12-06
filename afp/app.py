@@ -225,15 +225,15 @@ def load_sp500_reference_cache(
         
         if needs_refresh and show_progress:
             if force_refresh:
-                refresh_msg = "fundamentals (monthly) and prices (weekly)"
+                refresh_msg = "fundamentals (monthly) and prices (daily)"
             elif force_refresh_prices:
-                refresh_msg = "prices (weekly)"
+                refresh_msg = "prices (daily)"
             elif cache_status.get("fundamentals_is_stale") and cache_status.get("prices_is_stale"):
-                refresh_msg = "fundamentals (monthly) and prices (weekly)"
+                refresh_msg = "fundamentals (monthly) and prices (daily)"
             elif cache_status.get("fundamentals_is_stale"):
                 refresh_msg = "fundamentals (monthly)"
             elif cache_status.get("prices_is_stale"):
-                refresh_msg = "prices (weekly)"
+                refresh_msg = "prices (daily)"
             else:
                 refresh_msg = "cache"
             
@@ -364,7 +364,7 @@ with st.sidebar:
         prices_stale = cache_status.get("prices_is_stale", True)
         prices_icon = "✅" if not prices_stale else "⚠️"
         prices_date = prices_updated[:10] if prices_updated else "Unknown"
-        st.caption(f"{prices_icon} Prices: {prices_date} (weekly)")
+        st.caption(f"{prices_icon} Prices: {prices_date} (daily)")
     else:
         st.caption("⚠️ Prices: Not cached")
     
@@ -384,7 +384,7 @@ with st.sidebar:
     with col1:
         refresh_all_btn = st.button("All", help="Refresh both fundamentals and prices")
     with col2:
-        refresh_prices_btn = st.button("Prices", help="Refresh prices only (weekly)")
+        refresh_prices_btn = st.button("Prices", help="Refresh prices only (daily)")
     with col3:
         clear_cache_btn = st.button("Clear", help="Delete all cached data")
     
