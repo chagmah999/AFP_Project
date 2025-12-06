@@ -313,14 +313,12 @@ def _collect_sp500_prices(
                 px["date"] = pd.to_datetime(px["date"])
                 px = px.sort_values("date")
             
-            # Calculate returns
             s = pd.to_numeric(px["adjClose"], errors="coerce")
             px["returns"] = s.pct_change()
             
             ratio = s.div(s.shift(1)).clip(lower=1e-12)
             px["log_returns"] = np.log(ratio)
             
-            # Keep only necessary columns
             keep_cols = ["date", "ticker", "adjClose", "returns", "log_returns"]
             keep_cols = [c for c in keep_cols if c in px.columns]
             frames.append(px[keep_cols])
@@ -331,7 +329,6 @@ def _collect_sp500_prices(
         except Exception as e:
             print(f"[sector_cache] Error fetching prices for {tk}: {e}")
         
-        # Rate limiting
         time.sleep(API_CALL_DELAY)
         if (i + 1) % BATCH_SIZE == 0:
             time.sleep(BATCH_DELAY)
@@ -471,7 +468,6 @@ def get_sp500_sector_scores(
         if fetcher is None:
             if not FMP_API_KEY or FMP_API_KEY == "YOUR_FMP_API_KEY":
                 print("[sector_cache] ERROR: No valid FMP API key configured")
-                # Try to use stale caches if available
                 if fundamentals_df is None:
                     fundamentals_df = _load_fundamentals_cache()
                 if prices_df is None:
@@ -648,13 +644,13 @@ def _effective_rank_percentile(value: float, peer_values: np.ndarray, ascending:
     n = len(all_values)
     
     if n == 1:
-        return 0.5  # Single value
+        return 0.5 
     
     if ascending:
         ranks = rankdata(all_values, method='average')
-        target_rank = ranks[-1]  # Last element is our value
+        target_rank = ranks[-1]  
         percentile = (target_rank - 1) / (n - 1)
-        return 1.0 - percentile  # Invert so low value = high percentile
+        return 1.0 - percentile  
     else:
         ranks = rankdata(all_values, method='average')
         target_rank = ranks[-1]
