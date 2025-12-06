@@ -14,11 +14,8 @@ class MarketMancerEngine:
         alpha_preds: Dict[str, dict] | None,
         stress: Any | None = None,
     ) -> None:
-        # Store inputs, falling back to empty dicts if None
         self.factor_forecasts = factor_forecasts or {}
         self.alpha_preds = alpha_preds or {}
-        # Stress is ignored by design, but kept in the signature so that
-        # older code that passed a third argument still runs without error.
         self.stress = None
 
     def _build_factor_df(self) -> pd.DataFrame:
