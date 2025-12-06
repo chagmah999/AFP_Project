@@ -12,7 +12,6 @@ def collect_fundamental_data(tickers, start_date, fetcher):
     profile_rows = []
 
     for tk in tickers:
-        # Fetch fundamentals
         bs = fetcher.get_balance_sheet(tk)
         inc = fetcher.get_income_statement(tk)
         cf = fetcher.get_cash_flow(tk)
@@ -62,12 +61,7 @@ def collect_price_data(
     end_date: str | None,
     fetcher: FMPDataFetcher,
 ) -> pd.DataFrame:
-    """
-    Collect daily price data for all tickers using FMPDataFetcher.get_price_history.
 
-    Returns a DataFrame with at least:
-        date, ticker, adjClose, returns, log_returns
-    """
     frames: list[pd.DataFrame] = []
 
     if end_date is None:
@@ -75,14 +69,12 @@ def collect_price_data(
 
     for i, t in enumerate(tickers, 1):
         try:
-            # Use the new method defined in fmp.py
             px = fetcher.get_price_history(t, start_date, end_date)
 
             if not isinstance(px, pd.DataFrame) or px.empty:
                 continue
 
             if "adjClose" not in px.columns:
-                # If get_price_history was changed to return a different column, handle gracefully
                 if "close" in px.columns:
                     px = px.rename(columns={"close": "adjClose"})
                 else:
