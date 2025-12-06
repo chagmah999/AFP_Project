@@ -22,7 +22,6 @@ from afp_app.signal_alpha import AlphaPredictor
 from afp_app.engine import MarketMancerEngine
 from afp_app.optimizer import UnifiedPortfolioOptimizer
 
-# Import the new sector cache module
 from afp_app.sector_cache import (
     get_sp500_sector_scores,
     get_cache_status,
@@ -31,33 +30,6 @@ from afp_app.sector_cache import (
 
 
 def compute_factor_performance(factor_returns_hist: pd.DataFrame):
-    """
-    Compute performance statistics and cumulative return paths
-    for each factor.
-
-    The input can be either:
-      1) Long format with columns ['date','factor','return', ...], or
-      2) Wide format with a date index (or 'date' column) and one
-         numeric column per factor (plus optional 'rf_daily').
-
-    Expected columns in long format:
-      - 'date': calendar date of the factor return
-      - 'factor': factor name (e.g. 'VALUE', 'QUALITY', ...)
-      - 'return': daily factor return in decimals
-      - optional 'rf_daily': daily risk free rate in decimals
-        (if present, it can either be repeated per factor row or
-         stored in a separate row; it will be aligned by date)
-
-    Returns
-    -------
-    perf_summary : DataFrame
-        One row per factor with columns:
-        ['factor', 'total_return', 'ann_return', 'ann_vol',
-         'sharpe', 'max_drawdown']
-    cum_paths : DataFrame
-        Cumulative simple return paths (decimal) for each factor,
-        indexed by date, one column per factor.
-    """
     raw = factor_returns_hist.copy()
     if raw.empty:
         empty_perf = pd.DataFrame(
@@ -73,15 +45,11 @@ def compute_factor_performance(factor_returns_hist: pd.DataFrame):
         empty_cum = pd.DataFrame()
         return empty_perf, empty_cum
 
-    # ------------------------------------------------------------------
-    # Case 1: long format ['date','factor','return', ...]
-    # ------------------------------------------------------------------
     if {"date", "factor", "return"}.issubset(raw.columns):
         df = raw.copy()
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         df = df[~df["date"].isna()]
 
-        # Pull out risk free if present
         if "rf_daily" in df.columns:
             # Take one rf value per date (mean across rows if repeated)
             rf_daily = (
@@ -94,7 +62,6 @@ def compute_factor_performance(factor_returns_hist: pd.DataFrame):
         else:
             rf_daily = None
 
-        # Pivot factor returns to wide: one column per factor
         wide = (
             df.pivot_table(
                 index="date",
@@ -105,16 +72,12 @@ def compute_factor_performance(factor_returns_hist: pd.DataFrame):
             .sort_index()
         )
 
-        # Merge risk free back in as a separate column if available
         if rf_daily is not None:
             wide["rf_daily"] = rf_daily.reindex(wide.index).ffill()
 
         wide.index = pd.DatetimeIndex(wide.index)
         wide = wide[~wide.index.isna()]
 
-    # ------------------------------------------------------------------
-    # Case 2: already wide format
-    # ------------------------------------------------------------------
     else:
         df = raw.copy()
 
@@ -149,7 +112,6 @@ def compute_factor_performance(factor_returns_hist: pd.DataFrame):
         empty_cum = pd.DataFrame()
         return empty_perf, empty_cum
 
-    # Identify risk free and factor columns
     if "rf_daily" in wide.columns:
         rf_daily = wide["rf_daily"].astype(float)
         candidate_cols = [c for c in wide.columns if c != "rf_daily"]
@@ -187,7 +149,6 @@ def compute_factor_performance(factor_returns_hist: pd.DataFrame):
         if r.empty:
             continue
 
-        # Align rf_daily to this factor's dates if present
         if isinstance(rf_daily, pd.Series):
             rf_used = rf_daily.reindex(r.index).ffill().fillna(0.0)
         else:
@@ -195,22 +156,18 @@ def compute_factor_performance(factor_returns_hist: pd.DataFrame):
 
         n_days = len(r)
 
-        # Cumulative simple return path
         cum = (1.0 + r).cumprod() - 1.0
         cum_paths[fac] = cum
 
-        # Total and annualized return
         total_return = (1.0 + r).prod() - 1.0
         if n_days > 0:
             ann_return = (1.0 + total_return) ** (ann_factor / n_days) - 1.0
         else:
             ann_return = np.nan
 
-        # Annualized volatility
         daily_vol = r.std(ddof=1)
         ann_vol = daily_vol * np.sqrt(ann_factor)
 
-        # Sharpe ratio (excess return vs rf_daily if available)
         if isinstance(rf_used, pd.Series):
             excess = r - rf_used
             excess_mean = excess.mean()
@@ -224,7 +181,6 @@ def compute_factor_performance(factor_returns_hist: pd.DataFrame):
         else:
             sharpe = np.nan
 
-        # Max drawdown on gross return path
         gross_path = (1.0 + r).cumprod()
         running_max = gross_path.cummax()
         drawdown = gross_path / running_max - 1.0
@@ -251,29 +207,13 @@ def load_sp500_reference_cache(
     force_refresh_prices: bool = False,
     show_progress: bool = True
 ) -> pd.DataFrame:
-    """
-    Load the S&P 500 sector reference cache.
-    
-    This function handles loading or refreshing the cache with proper
-    error handling and progress display.
-    
-    Args:
-        api_key: FMP API key
-        force_refresh: If True, force a cache refresh of both fundamentals and prices
-        force_refresh_prices: If True, force refresh prices only
-        show_progress: If True, show a progress bar during cache refresh
-    
-    Returns:
-        DataFrame with S&P 500 factor scores, or empty DataFrame on failure
-    """
+
     try:
-        # Create fetcher if we have an API key
         if api_key and api_key != "YOUR_FMP_API_KEY":
             fetcher = FMPDataFetcher(api_key=api_key)
         else:
             fetcher = None
         
-        # Check if we need to refresh (will show progress) or just load from cache
         cache_status = get_cache_status()
         needs_refresh = (
             force_refresh or 
@@ -283,7 +223,6 @@ def load_sp500_reference_cache(
         )
         
         if needs_refresh and show_progress:
-            # Determine what's being refreshed for the message
             if force_refresh:
                 refresh_msg = "fundamentals (monthly) and prices (weekly)"
             elif force_refresh_prices:
@@ -297,7 +236,6 @@ def load_sp500_reference_cache(
             else:
                 refresh_msg = "cache"
             
-            # Show progress bar during cache refresh
             progress_container = st.container()
             with progress_container:
                 st.info(f"🔄 Refreshing S&P 500 {refresh_msg}...")
@@ -305,12 +243,10 @@ def load_sp500_reference_cache(
                 status_text = st.empty()
                 
                 def progress_callback(current: int, total: int, message: str):
-                    # Calculate progress percentage
                     pct = min(current / max(total, 1), 1.0)
                     progress_bar.progress(pct, text=f"{message} ({current}/{total})")
                     status_text.caption(f"Processing: {message}")
                 
-                # Get the cached or fresh S&P 500 scores with progress callback
                 sp500_ref = get_sp500_sector_scores(
                     fetcher=fetcher,
                     force_refresh=force_refresh,
@@ -318,12 +254,10 @@ def load_sp500_reference_cache(
                     progress_callback=progress_callback,
                 )
                 
-                # Clear progress indicators on completion
                 progress_bar.progress(1.0, text="Complete!")
                 time.sleep(0.5)
                 progress_container.empty()
         else:
-            # Just load from cache (fast, no progress needed)
             sp500_ref = get_sp500_sector_scores(
                 fetcher=fetcher,
                 force_refresh=force_refresh,
@@ -342,7 +276,6 @@ st.set_page_config(page_title="AFP Forecasting Tool", layout="wide")
 st.title("AFP Forecasting Tool")
 st.caption("Factor premia forecasts, stock-level alpha, and unified portfolio optimization")
 
-# Initialize session state variables
 for key, default in [
     ("base_forecasts", None),
     ("base_factor_eval", None),
@@ -355,8 +288,8 @@ for key, default in [
     ("optimized_portfolio", None),
     ("portfolio_horizon", None),
     ("factor_returns", None),
-    ("sp500_reference", None),  # NEW: Store S&P 500 reference cache
-    ("sp500_cache_status", None),  # NEW: Store cache status info
+    ("sp500_reference", None), 
+    ("sp500_cache_status", None),  
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -411,14 +344,11 @@ with st.sidebar:
         index=0,
     )
 
-    # NEW: S&P 500 Cache Management Section
     st.markdown("### S&P 500 Sector Benchmark")
     
-    # Display cache status
     cache_status = get_cache_status()
     st.session_state["sp500_cache_status"] = cache_status
     
-    # Fundamentals cache status
     if cache_status.get("fundamentals_exists"):
         fund_updated = cache_status.get("fundamentals_last_updated", "Unknown")
         fund_stale = cache_status.get("fundamentals_is_stale", True)
@@ -428,7 +358,6 @@ with st.sidebar:
     else:
         st.caption("⚠️ Fundamentals: Not cached")
     
-    # Prices cache status
     if cache_status.get("prices_exists"):
         prices_updated = cache_status.get("prices_last_updated", "Unknown")
         prices_stale = cache_status.get("prices_is_stale", True)
@@ -438,12 +367,10 @@ with st.sidebar:
     else:
         st.caption("⚠️ Prices: Not cached")
     
-    # Show ticker count
     ticker_count = cache_status.get("fundamentals_ticker_count", 0)
     if ticker_count > 0:
         st.caption(f"📊 {ticker_count} S&P 500 stocks cached")
     
-    # Option to use sector-relative scoring
     use_sector_relative = st.checkbox(
         "Use S&P 500 sector-relative scoring",
         value=True,
@@ -451,7 +378,6 @@ with st.sidebar:
              "in the same sector. If disabled, scores are relative to the selected universe only."
     )
     
-    # Refresh buttons
     st.caption("Refresh cache:")
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -514,15 +440,12 @@ if run_btn:
 
     st.session_state["portfolio_horizon"] = int(forecast_horizon)
 
-    # =========================================================
-    # NEW: Load S&P 500 reference cache (if using sector-relative scoring)
-    # =========================================================
+
     sp500_reference = pd.DataFrame()
     
     if use_sector_relative:
         status.info("Loading S&P 500 sector benchmark cache...")
         
-        # Check if we already have it in session state and it's not stale
         cached_ref = st.session_state.get("sp500_reference")
         cache_status = get_cache_status()
         
@@ -530,7 +453,6 @@ if run_btn:
             sp500_reference = cached_ref
             status.success(f"Using cached S&P 500 benchmark ({len(sp500_reference)} stocks)")
         else:
-            # Load or refresh the cache (with progress bar if needed)
             sp500_reference = load_sp500_reference_cache(
                 api_key, 
                 force_refresh=False, 
@@ -571,7 +493,6 @@ if run_btn:
 
     status.info("Computing factor scores and factor returns...")
     
-    # MODIFIED: Pass sp500_reference to calculate_factor_metrics
     if use_sector_relative and not sp500_reference.empty:
         metrics = calculate_factor_metrics(
             fundamentals, 
@@ -619,7 +540,6 @@ if run_btn:
             if c in latest.columns
         ]
 
-        # MODIFIED: Include sector in the sample scores table
         display_cols = ["ticker"]
         if "sector" in latest.columns:
             display_cols.append("sector")
@@ -753,9 +673,7 @@ factor_eval = st.session_state.get("base_factor_eval")
 if not forecasts and not alpha_preds:
     st.info("Run the pipeline from the sidebar to generate forecasts.")
 else:
-    # =========================================================
-    # 0. Historical factor performance (backtest)
-    # =========================================================
+
     factor_returns_hist = st.session_state.get("factor_returns")
 
     if isinstance(factor_returns_hist, pd.DataFrame) and not factor_returns_hist.empty:
@@ -817,10 +735,6 @@ else:
             "No historical factor returns are available yet. "
             "Run the pipeline to compute factor portfolios and their return history."
         )
-
-    # =========================================================
-    # 1. Factor premia forecasts (first, core view)
-    # =========================================================
 
     st.subheader("Factor premia forecasts")
 
@@ -972,9 +886,6 @@ else:
     else:
         st.info("No factor forecasts available.")
 
-    # =========================================================
-    # MODIFIED: Universe and stock-level factor scores section
-    # =========================================================
     with st.expander("Show universe and stock-level factor scores (details)"):
         uni = st.session_state.get("universe_tickers")
         port_sizes = st.session_state.get("factor_portfolio_sizes")
@@ -994,7 +905,6 @@ else:
             st.json(port_sizes)
 
         if isinstance(sample_scores, pd.DataFrame) and not sample_scores.empty:
-            # MODIFIED: Updated description based on scoring method
             if sp500_ref is not None and not sp500_ref.empty:
                 sp500_count = len(sp500_ref)
                 sectors_in_ref = sp500_ref["sector"].nunique() if "sector" in sp500_ref.columns else 0
@@ -1013,7 +923,6 @@ else:
                     "the stock ranks better than 80% of universe peers on that factor."
                 )
             
-            # Format the scores nicely
             score_display = sample_scores.copy()
             format_dict = {}
             for col in score_display.columns:
@@ -1025,7 +934,6 @@ else:
                 use_container_width=True,
             )
             
-            # Show S&P 500 cache info
             if cache_status:
                 with st.expander("S&P 500 Benchmark Cache Info"):
                     col1, col2 = st.columns(2)
