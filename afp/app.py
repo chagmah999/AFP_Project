@@ -51,7 +51,6 @@ def compute_factor_performance(factor_returns_hist: pd.DataFrame):
         df = df[~df["date"].isna()]
 
         if "rf_daily" in df.columns:
-            # Take one rf value per date (mean across rows if repeated)
             rf_daily = (
                 df[["date", "rf_daily"]]
                 .dropna()
@@ -399,7 +398,6 @@ with st.sidebar:
         if not api_key:
             st.error("Please enter an API key first.")
         else:
-            # Progress bar will be shown by load_sp500_reference_cache
             sp500_ref = load_sp500_reference_cache(api_key, force_refresh=True, show_progress=True)
             if not sp500_ref.empty:
                 st.session_state["sp500_reference"] = sp500_ref
@@ -412,7 +410,6 @@ with st.sidebar:
         if not api_key:
             st.error("Please enter an API key first.")
         else:
-            # Refresh only prices
             sp500_ref = load_sp500_reference_cache(
                 api_key, 
                 force_refresh=False, 
@@ -553,7 +550,6 @@ if run_btn:
         st.session_state["factor_portfolio_sizes"] = port_sizes
         st.session_state["sample_factor_scores"] = sample
 
-    # Store factor return history for backtesting display
     if isinstance(factor_returns, pd.DataFrame) and not factor_returns.empty:
         st.session_state["factor_returns"] = factor_returns.copy()
     else:
