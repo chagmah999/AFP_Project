@@ -28,9 +28,6 @@ from afp_app.sector_cache import (
     clear_cache as clear_sp500_cache,
 )
 
-
-
-
 def compute_factor_performance(factor_returns_hist: pd.DataFrame):
     raw = factor_returns_hist.copy()
     if raw.empty:
