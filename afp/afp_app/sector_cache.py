@@ -11,6 +11,9 @@ This module maintains two separate caches:
 
 This hybrid approach minimizes API calls while keeping time-sensitive
 data (momentum, volatility) reasonably fresh.
+
+Percentile calculations use effective rank via scipy's rankdata for proper
+tie handling, matching the original methodology.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ from typing import Optional, Callable
 
 import numpy as np
 import pandas as pd
+from scipy.stats import rankdata
 
 from .config import FMP_API_KEY, DEFAULT_START_DATE
 from .fmp import FMPDataFetcher
@@ -799,7 +803,60 @@ def clear_prices_cache() -> bool:
 
 
 # =============================================================================
-# Sector Percentile Computation (unchanged from original)
+# Effective Rank Percentile Calculation (using scipy rankdata)
+# =============================================================================
+
+def _effective_rank_percentile(value: float, peer_values: np.ndarray, ascending: bool = True) -> float:
+    """
+    Compute the effective rank percentile of a single value against a peer group.
+    
+    Uses scipy's rankdata with method='average' for proper tie handling.
+    Formula: percentile = (effective_rank - 1) / (n - 1)
+    
+    Args:
+        value: The value to rank
+        peer_values: Array of peer values to rank against
+        ascending: If True, lower values are "better" (get higher percentile when inverted)
+                   If False, higher values are "better" (get higher percentile)
+    
+    Returns:
+        Percentile (0 to 1) where higher means "better" for the factor
+    """
+    if pd.isna(value) or len(peer_values) == 0:
+        return np.nan
+    
+    # Remove NaN from peers
+    peer_values = peer_values[~np.isnan(peer_values)]
+    
+    if len(peer_values) == 0:
+        return np.nan
+    
+    # Combine value with peers for ranking
+    all_values = np.append(peer_values, value)
+    n = len(all_values)
+    
+    if n == 1:
+        return 0.5  # Single value
+    
+    # Rank all values (including the target)
+    if ascending:
+        # Lower is better: we want high percentile for low values
+        # So we rank normally, then the percentile formula gives low rank = low percentile
+        # We then invert: 1 - percentile
+        ranks = rankdata(all_values, method='average')
+        target_rank = ranks[-1]  # Last element is our value
+        percentile = (target_rank - 1) / (n - 1)
+        return 1.0 - percentile  # Invert so low value = high percentile
+    else:
+        # Higher is better: high values should get high percentile
+        ranks = rankdata(all_values, method='average')
+        target_rank = ranks[-1]
+        percentile = (target_rank - 1) / (n - 1)
+        return percentile
+
+
+# =============================================================================
+# Sector Percentile Computation (using effective rank)
 # =============================================================================
 
 def compute_sector_percentiles(
@@ -809,6 +866,9 @@ def compute_sector_percentiles(
 ) -> pd.DataFrame:
     """
     Compute sector-relative percentiles for stocks against S&P 500 reference.
+    
+    Uses effective rank via scipy's rankdata for proper tie handling.
+    Formula: percentile = (effective_rank - 1) / (n - 1)
     
     For each stock, calculates where it ranks (0-1 percentile) among all 
     S&P 500 stocks in the same sector for each factor.
@@ -821,8 +881,8 @@ def compute_sector_percentiles(
                         If None, uses default factor columns
     
     Returns:
-        DataFrame with same tickers as input, but factor columns replaced with
-        sector-relative percentile scores (0-1)
+        DataFrame with same tickers as input, with added _score columns
+        containing sector-relative percentile scores (0-1)
     """
     if stock_metrics.empty or sp500_reference.empty:
         return stock_metrics.copy()
@@ -876,25 +936,21 @@ def compute_sector_percentiles(
             # Fallback to entire S&P 500 if sector has no peers
             sector_peers = sp500_reference
         
-        # Compute percentile for each factor
+        # Compute percentile for each factor using effective rank
         for factor in available_factors:
             stock_value = row.get(factor)
             
             if pd.isna(stock_value):
                 continue
             
-            peer_values = sector_peers[factor].dropna()
+            peer_values = sector_peers[factor].dropna().values
             
-            if peer_values.empty:
+            if len(peer_values) == 0:
                 continue
             
-            # Compute percentile rank
-            if factor in ascending_factors:
-                # Lower is better - percentile of stocks with HIGHER values
-                percentile = (peer_values > stock_value).sum() / len(peer_values)
-            else:
-                # Higher is better - percentile of stocks with LOWER values
-                percentile = (peer_values < stock_value).sum() / len(peer_values)
+            # Use effective rank percentile
+            is_ascending = factor in ascending_factors
+            percentile = _effective_rank_percentile(stock_value, peer_values, ascending=is_ascending)
             
             # Update result
             result.loc[result["ticker"] == ticker, f"{factor}_score"] = percentile
@@ -910,6 +966,8 @@ def get_sector_percentile_for_ticker(
 ) -> dict:
     """
     Convenience function to get sector percentiles for a single ticker.
+    
+    Uses effective rank via scipy's rankdata for proper tie handling.
     
     Args:
         ticker: Stock ticker symbol
@@ -939,16 +997,15 @@ def get_sector_percentile_for_ticker(
         if pd.isna(value) or factor not in sp500_reference.columns:
             continue
         
-        peer_values = sector_peers[factor].dropna()
+        peer_values = sector_peers[factor].dropna().values
         
-        if peer_values.empty:
+        if len(peer_values) == 0:
             continue
         
-        if factor in ascending_factors:
-            percentile = (peer_values > value).sum() / len(peer_values)
-        else:
-            percentile = (peer_values < value).sum() / len(peer_values)
+        is_ascending = factor in ascending_factors
+        percentile = _effective_rank_percentile(value, peer_values, ascending=is_ascending)
         
-        percentiles[factor] = float(percentile)
+        if not np.isnan(percentile):
+            percentiles[factor] = float(percentile)
     
     return percentiles
