@@ -1,21 +1,3 @@
-"""
-sector_cache.py
-
-Hybrid caching system for S&P 500 factor scores.
-
-This module maintains two separate caches:
-1. Fundamentals cache (profiles, balance sheet, income statement, cash flow)
-   - Refreshed MONTHLY (these change quarterly at most)
-2. Prices cache (price history for momentum/volatility)
-   - Refreshed WEEKLY (or daily if API limits allow)
-
-This hybrid approach minimizes API calls while keeping time-sensitive
-data (momentum, volatility) reasonably fresh.
-
-Percentile calculations use effective rank via scipy's rankdata for proper
-tie handling, matching the original methodology.
-"""
-
 from __future__ import annotations
 
 import os
@@ -33,61 +15,38 @@ from .config import FMP_API_KEY, DEFAULT_START_DATE
 from .fmp import FMPDataFetcher
 from .universe import fetch_sp500_from_fmp, ALL_SP500
 
-
-# =============================================================================
-# Configuration
-# =============================================================================
-
 CACHE_DIR = os.getenv("SP500_CACHE_DIR", "./cache")
 
-# Cache filenames
 FUNDAMENTALS_CACHE_FILENAME = "sp500_fundamentals.parquet"
 PRICES_CACHE_FILENAME = "sp500_prices.parquet"
 CACHE_METADATA_FILENAME = "sp500_cache_metadata.json"
 
-# Refresh frequencies (in days)
-# Change PRICES_REFRESH_DAYS to 1 for daily refresh if API limits allow
-FUNDAMENTALS_REFRESH_DAYS = 30  # Monthly
-PRICES_REFRESH_DAYS = 7         # Weekly (change to 1 for daily)
 
-# Minimum data requirements
+FUNDAMENTALS_REFRESH_DAYS = 30  
+PRICES_REFRESH_DAYS = 7         
+
 MIN_PRICE_HISTORY_DAYS = 60
 
-# Rate limiting for API calls
-API_CALL_DELAY = 0.1  # seconds between API calls
-BATCH_SIZE = 10       # Number of tickers to process before a longer pause
-BATCH_DELAY = 1.0     # seconds to pause after each batch
-
-
-# =============================================================================
-# Cache Path Helpers
-# =============================================================================
+API_CALL_DELAY = 0.1  
+BATCH_SIZE = 10       
+BATCH_DELAY = 1.0     
 
 def _get_cache_dir() -> Path:
-    """Get or create the cache directory."""
     cache_path = Path(CACHE_DIR)
     cache_path.mkdir(parents=True, exist_ok=True)
     return cache_path
 
 
 def _get_fundamentals_cache_path() -> Path:
-    """Get the path to the fundamentals cache file."""
     return _get_cache_dir() / FUNDAMENTALS_CACHE_FILENAME
 
 
 def _get_prices_cache_path() -> Path:
-    """Get the path to the prices cache file."""
     return _get_cache_dir() / PRICES_CACHE_FILENAME
 
 
 def _get_metadata_file_path() -> Path:
-    """Get the path to the cache metadata file."""
     return _get_cache_dir() / CACHE_METADATA_FILENAME
-
-
-# =============================================================================
-# Metadata Management
-# =============================================================================
 
 def _load_cache_metadata() -> dict:
     """Load cache metadata (last update times, ticker counts, etc.)."""
@@ -103,14 +62,12 @@ def _load_cache_metadata() -> dict:
 
 
 def _save_cache_metadata(metadata: dict) -> None:
-    """Save cache metadata."""
     meta_path = _get_metadata_file_path()
     with open(meta_path, "w") as f:
         json.dump(metadata, f, indent=2, default=str)
 
 
 def _update_metadata(cache_type: str, ticker_count: int, extra_info: dict = None) -> None:
-    """Update metadata for a specific cache type."""
     metadata = _load_cache_metadata()
     
     metadata[f"{cache_type}_last_updated"] = datetime.now().isoformat()
@@ -121,14 +78,8 @@ def _update_metadata(cache_type: str, ticker_count: int, extra_info: dict = None
             metadata[f"{cache_type}_{key}"] = value
     
     _save_cache_metadata(metadata)
-
-
-# =============================================================================
-# Staleness Checks
-# =============================================================================
-
+   
 def _is_fundamentals_stale() -> bool:
-    """Check if the fundamentals cache needs to be refreshed."""
     cache_path = _get_fundamentals_cache_path()
     
     if not cache_path.exists():
@@ -160,7 +111,6 @@ def _is_fundamentals_stale() -> bool:
 
 
 def _is_prices_stale() -> bool:
-    """Check if the prices cache needs to be refreshed."""
     cache_path = _get_prices_cache_path()
     
     if not cache_path.exists():
@@ -191,12 +141,7 @@ def _is_prices_stale() -> bool:
     return is_stale
 
 
-# =============================================================================
-# Cache Loading
-# =============================================================================
-
 def _load_fundamentals_cache() -> Optional[pd.DataFrame]:
-    """Load the cached fundamentals data."""
     cache_path = _get_fundamentals_cache_path()
     
     if not cache_path.exists():
@@ -212,7 +157,6 @@ def _load_fundamentals_cache() -> Optional[pd.DataFrame]:
 
 
 def _load_prices_cache() -> Optional[pd.DataFrame]:
-    """Load the cached prices data."""
     cache_path = _get_prices_cache_path()
     
     if not cache_path.exists():
@@ -226,13 +170,7 @@ def _load_prices_cache() -> Optional[pd.DataFrame]:
         print(f"[sector_cache] Error loading prices cache: {e}")
         return None
 
-
-# =============================================================================
-# Cache Saving
-# =============================================================================
-
 def _save_fundamentals_cache(df: pd.DataFrame, sectors: list = None) -> bool:
-    """Save the fundamentals data to cache."""
     cache_path = _get_fundamentals_cache_path()
     
     try:
@@ -250,7 +188,6 @@ def _save_fundamentals_cache(df: pd.DataFrame, sectors: list = None) -> bool:
 
 
 def _save_prices_cache(df: pd.DataFrame) -> bool:
-    """Save the prices data to cache."""
     cache_path = _get_prices_cache_path()
     
     try:
@@ -263,25 +200,12 @@ def _save_prices_cache(df: pd.DataFrame) -> bool:
         print(f"[sector_cache] Error saving prices cache: {e}")
         return False
 
-
-# =============================================================================
-# Data Collection: Fundamentals
-# =============================================================================
-
 def _collect_sp500_fundamentals(
     tickers: list[str],
     fetcher: FMPDataFetcher,
     progress_callback: Optional[Callable[[int, int, str], None]] = None
 ) -> pd.DataFrame:
-    """
-    Collect fundamental data (profiles, BS, IS, CF) for all S&P 500 stocks.
-    
-    Returns a DataFrame with one row per ticker containing:
-    - ticker, sector, industry
-    - Key balance sheet items
-    - Key income statement items
-    - Key cash flow items
-    """
+
     bs_rows = []
     inc_rows = []
     cf_rows = []
@@ -291,7 +215,6 @@ def _collect_sp500_fundamentals(
     
     for i, tk in enumerate(tickers):
         try:
-            # Fetch profile for sector/industry
             prof = fetcher.get_profile(tk)
             if prof:
                 profile_data[tk] = {
@@ -299,23 +222,22 @@ def _collect_sp500_fundamentals(
                     "industry": prof.get("industry"),
                 }
             
-            # Fetch fundamentals
             bs = fetcher.get_balance_sheet(tk)
             inc = fetcher.get_income_statement(tk)
             cf = fetcher.get_cash_flow(tk)
             
             if isinstance(bs, list) and bs:
-                row = bs[0].copy()  # Most recent
+                row = bs[0].copy()  
                 row["ticker"] = tk
                 bs_rows.append(row)
             
             if isinstance(inc, list) and inc:
-                row = inc[0].copy()  # Most recent
+                row = inc[0].copy()  
                 row["ticker"] = tk
                 inc_rows.append(row)
             
             if isinstance(cf, list) and cf:
-                row = cf[0].copy()  # Most recent
+                row = cf[0].copy()  
                 row["ticker"] = tk
                 cf_rows.append(row)
             
@@ -325,49 +247,37 @@ def _collect_sp500_fundamentals(
         except Exception as e:
             print(f"[sector_cache] Error fetching fundamentals for {tk}: {e}")
         
-        # Rate limiting
         time.sleep(API_CALL_DELAY)
         if (i + 1) % BATCH_SIZE == 0:
             time.sleep(BATCH_DELAY)
     
-    # Build DataFrames
     bs_df = pd.DataFrame(bs_rows) if bs_rows else pd.DataFrame()
     inc_df = pd.DataFrame(inc_rows) if inc_rows else pd.DataFrame()
     cf_df = pd.DataFrame(cf_rows) if cf_rows else pd.DataFrame()
     
-    # Merge all fundamentals
     if bs_df.empty:
         return pd.DataFrame()
     
     result = bs_df.copy()
     
     if not inc_df.empty:
-        # Select key income statement columns
         inc_cols = ["ticker", "revenue", "netIncome", "grossProfit", "operatingIncome", 
                     "eps", "ebitda", "weightedAverageShsOut", "weightedAverageShsOutDil"]
         inc_cols = [c for c in inc_cols if c in inc_df.columns]
         result = result.merge(inc_df[inc_cols], on="ticker", how="left")
     
     if not cf_df.empty:
-        # Select key cash flow columns
         cf_cols = ["ticker", "freeCashFlow", "operatingCashFlow"]
         cf_cols = [c for c in cf_cols if c in cf_df.columns]
         result = result.merge(cf_df[cf_cols], on="ticker", how="left")
     
-    # Add sector/industry from profiles
     result["sector"] = result["ticker"].map(lambda tk: profile_data.get(tk, {}).get("sector"))
     result["industry"] = result["ticker"].map(lambda tk: profile_data.get(tk, {}).get("industry"))
     
-    # Convert date column
     if "date" in result.columns:
         result["date"] = pd.to_datetime(result["date"], errors="coerce")
     
     return result
-
-
-# =============================================================================
-# Data Collection: Prices
-# =============================================================================
 
 def _collect_sp500_prices(
     tickers: list[str],
@@ -376,11 +286,7 @@ def _collect_sp500_prices(
     end_date: Optional[str] = None,
     progress_callback: Optional[Callable[[int, int, str], None]] = None
 ) -> pd.DataFrame:
-    """
-    Collect price data for all S&P 500 stocks.
-    
-    Returns DataFrame with: date, ticker, adjClose, returns, log_returns
-    """
+
     if end_date is None:
         end_date = datetime.now().strftime("%Y-%m-%d")
     
@@ -435,13 +341,7 @@ def _collect_sp500_prices(
     
     return pd.concat(frames, ignore_index=True).sort_values(["ticker", "date"]).reset_index(drop=True)
 
-
-# =============================================================================
-# Factor Score Computation
-# =============================================================================
-
 def _safe_div(num, den):
-    """Safe division handling zeros and infinities."""
     num = np.asarray(num, dtype=float)
     den = np.asarray(den, dtype=float)
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -454,22 +354,11 @@ def _compute_factor_scores(
     fundamentals: pd.DataFrame,
     prices: pd.DataFrame
 ) -> pd.DataFrame:
-    """
-    Compute raw factor metrics from fundamentals and prices.
-    
-    Returns DataFrame with columns:
-        ticker, sector, industry,
-        bp_ratio, ep_ratio, fcfp_ratio (VALUE)
-        roe, roa, gross_margin, fcf_margin, debt_to_equity (QUALITY)
-        momentum_60d (MOMENTUM)
-        volatility_60d (LOW_VOL)
-    """
     if fundamentals.empty:
         return pd.DataFrame()
     
     metrics = fundamentals.copy()
     
-    # Get shares outstanding
     share_candidates = ["outstandingShares", "weightedAverageShsOut", "weightedAverageShsOutDil"]
     metrics["shares_out"] = np.nan
     for col in share_candidates:
@@ -478,7 +367,6 @@ def _compute_factor_scores(
                 pd.to_numeric(metrics[col], errors="coerce")
             )
     
-    # Get last price for each ticker
     if not prices.empty and "ticker" in prices.columns:
         last_price = (
             prices.sort_values("date")
@@ -489,15 +377,12 @@ def _compute_factor_scores(
     else:
         metrics["price_last"] = np.nan
     
-    # Book equity
     metrics["book_equity"] = pd.to_numeric(
         metrics.get("totalStockholdersEquity"), errors="coerce"
     )
     
-    # Market cap
     metrics["market_cap"] = metrics["shares_out"] * metrics["price_last"]
     
-    # VALUE FACTORS
     metrics["bp_ratio"] = _safe_div(metrics["book_equity"], metrics["market_cap"])
     metrics["ep_ratio"] = _safe_div(
         pd.to_numeric(metrics.get("netIncome"), errors="coerce"),
@@ -508,7 +393,6 @@ def _compute_factor_scores(
         metrics["market_cap"]
     )
     
-    # QUALITY FACTORS
     metrics["roe"] = _safe_div(
         pd.to_numeric(metrics.get("netIncome"), errors="coerce"),
         pd.to_numeric(metrics.get("totalStockholdersEquity"), errors="coerce")
@@ -530,9 +414,7 @@ def _compute_factor_scores(
         pd.to_numeric(metrics.get("totalStockholdersEquity"), errors="coerce")
     )
     
-    # MOMENTUM & VOLATILITY (from prices)
     if not prices.empty:
-        # Momentum: 60-day price change
         px_pivot = prices.pivot_table(index="date", columns="ticker", values="adjClose")
         
         if not px_pivot.empty:
@@ -541,7 +423,6 @@ def _compute_factor_scores(
                 last_mom = mom_60d.iloc[-1]
                 metrics["momentum_60d"] = metrics["ticker"].map(last_mom.to_dict())
         
-        # Volatility: 60-day rolling std of returns
         vol_60d = (
             prices
             .sort_values(["ticker", "date"])
@@ -550,32 +431,25 @@ def _compute_factor_scores(
         )
         metrics["volatility_60d"] = metrics["ticker"].map(vol_60d.to_dict())
     
-    # Clean up infinities
     metrics = metrics.replace([np.inf, -np.inf], np.nan)
     
-    # Select output columns
     output_cols = [
         "ticker", "sector", "industry",
-        # Value
+       
         "bp_ratio", "ep_ratio", "fcfp_ratio",
-        # Quality
+        
         "roe", "roa", "gross_margin", "fcf_margin", "debt_to_equity",
-        # Momentum
+       
         "momentum_60d",
-        # Low Vol
+        
         "volatility_60d",
-        # Additional
+       
         "market_cap", "price_last"
     ]
     
     output_cols = [c for c in output_cols if c in metrics.columns]
     
     return metrics[output_cols].copy()
-
-
-# =============================================================================
-# Main Public Interface
-# =============================================================================
 
 def get_sp500_sector_scores(
     fetcher: Optional[FMPDataFetcher] = None,
@@ -584,30 +458,13 @@ def get_sp500_sector_scores(
     force_refresh_prices: bool = False,
     progress_callback: Optional[Callable[[int, int, str], None]] = None
 ) -> pd.DataFrame:
-    """
-    Get S&P 500 factor scores using hybrid caching.
-    
-    Fundamentals are refreshed monthly, prices are refreshed weekly (or daily).
-    
-    Args:
-        fetcher: FMPDataFetcher instance (created if not provided)
-        force_refresh: If True, force refresh of both caches
-        force_refresh_fundamentals: If True, force refresh fundamentals only
-        force_refresh_prices: If True, force refresh prices only
-        progress_callback: Optional callback(current, total, message) for progress updates
-    
-    Returns:
-        DataFrame with factor scores for all S&P 500 stocks
-    """
-    # Determine what needs refreshing
+
     refresh_fundamentals = force_refresh or force_refresh_fundamentals or _is_fundamentals_stale()
     refresh_prices = force_refresh or force_refresh_prices or _is_prices_stale()
     
-    # Load existing caches
     fundamentals_df = _load_fundamentals_cache() if not refresh_fundamentals else None
     prices_df = _load_prices_cache() if not refresh_prices else None
     
-    # Check if we need to fetch anything
     need_fetcher = refresh_fundamentals or refresh_prices
     
     if need_fetcher:
@@ -625,7 +482,6 @@ def get_sp500_sector_scores(
             else:
                 fetcher = FMPDataFetcher(FMP_API_KEY)
         
-        # Get S&P 500 constituents
         tickers = fetch_sp500_from_fmp()
         if not tickers:
             print("[sector_cache] Using fallback S&P 500 list")
@@ -633,7 +489,6 @@ def get_sp500_sector_scores(
         
         print(f"[sector_cache] Processing {len(tickers)} S&P 500 stocks...")
         
-        # Calculate total steps for progress
         total_steps = 0
         if refresh_fundamentals:
             total_steps += len(tickers)
@@ -642,7 +497,6 @@ def get_sp500_sector_scores(
         
         current_step = 0
         
-        # Refresh fundamentals if needed
         if refresh_fundamentals and fetcher:
             print("[sector_cache] Refreshing fundamentals cache (monthly)...")
             
@@ -661,7 +515,6 @@ def get_sp500_sector_scores(
             
             current_step = len(tickers)
         
-        # Refresh prices if needed
         if refresh_prices and fetcher:
             print(f"[sector_cache] Refreshing prices cache ({PRICES_REFRESH_DAYS}-day cycle)...")
             
@@ -679,7 +532,6 @@ def get_sp500_sector_scores(
             if not prices_df.empty:
                 _save_prices_cache(prices_df)
     
-    # Compute factor scores from cached data
     if fundamentals_df is None or fundamentals_df.empty:
         print("[sector_cache] No fundamentals data available")
         return pd.DataFrame()
@@ -695,23 +547,15 @@ def get_sp500_sector_scores(
 
 
 def get_cache_status() -> dict:
-    """
-    Get detailed information about the current cache status.
-    
-    Returns:
-        Dictionary with cache status information for both fundamentals and prices
-    """
     metadata = _load_cache_metadata()
     
     fundamentals_path = _get_fundamentals_cache_path()
     prices_path = _get_prices_cache_path()
     
     status = {
-        # Overall
         "cache_exists": fundamentals_path.exists() and prices_path.exists(),
         "cache_dir": str(_get_cache_dir()),
         
-        # Fundamentals
         "fundamentals_exists": fundamentals_path.exists(),
         "fundamentals_last_updated": metadata.get("fundamentals_last_updated"),
         "fundamentals_ticker_count": metadata.get("fundamentals_ticker_count", 0),
@@ -719,14 +563,12 @@ def get_cache_status() -> dict:
         "fundamentals_is_stale": _is_fundamentals_stale(),
         "fundamentals_refresh_days": FUNDAMENTALS_REFRESH_DAYS,
         
-        # Prices
         "prices_exists": prices_path.exists(),
         "prices_last_updated": metadata.get("prices_last_updated"),
         "prices_ticker_count": metadata.get("prices_ticker_count", 0),
         "prices_is_stale": _is_prices_stale(),
         "prices_refresh_days": PRICES_REFRESH_DAYS,
         
-        # Combined staleness (for backward compatibility)
         "is_stale": _is_fundamentals_stale() or _is_prices_stale(),
         "last_updated": metadata.get("prices_last_updated") or metadata.get("fundamentals_last_updated"),
         "ticker_count": metadata.get("fundamentals_ticker_count", 0),
@@ -737,12 +579,6 @@ def get_cache_status() -> dict:
 
 
 def clear_cache() -> bool:
-    """
-    Clear all cache files.
-    
-    Returns:
-        True if successful, False otherwise
-    """
     try:
         fundamentals_path = _get_fundamentals_cache_path()
         prices_path = _get_prices_cache_path()
@@ -763,7 +599,6 @@ def clear_cache() -> bool:
 
 
 def clear_fundamentals_cache() -> bool:
-    """Clear only the fundamentals cache."""
     try:
         path = _get_fundamentals_cache_path()
         if path.exists():
@@ -783,7 +618,6 @@ def clear_fundamentals_cache() -> bool:
 
 
 def clear_prices_cache() -> bool:
-    """Clear only the prices cache."""
     try:
         path = _get_prices_cache_path()
         if path.exists():
@@ -801,89 +635,38 @@ def clear_prices_cache() -> bool:
         print(f"[sector_cache] Error clearing prices cache: {e}")
         return False
 
-
-# =============================================================================
-# Effective Rank Percentile Calculation (using scipy rankdata)
-# =============================================================================
-
 def _effective_rank_percentile(value: float, peer_values: np.ndarray, ascending: bool = True) -> float:
-    """
-    Compute the effective rank percentile of a single value against a peer group.
-    
-    Uses scipy's rankdata with method='average' for proper tie handling.
-    Formula: percentile = (effective_rank - 1) / (n - 1)
-    
-    Args:
-        value: The value to rank
-        peer_values: Array of peer values to rank against
-        ascending: If True, lower values are "better" (get higher percentile when inverted)
-                   If False, higher values are "better" (get higher percentile)
-    
-    Returns:
-        Percentile (0 to 1) where higher means "better" for the factor
-    """
     if pd.isna(value) or len(peer_values) == 0:
         return np.nan
     
-    # Remove NaN from peers
     peer_values = peer_values[~np.isnan(peer_values)]
     
     if len(peer_values) == 0:
         return np.nan
     
-    # Combine value with peers for ranking
     all_values = np.append(peer_values, value)
     n = len(all_values)
     
     if n == 1:
         return 0.5  # Single value
     
-    # Rank all values (including the target)
     if ascending:
-        # Lower is better: we want high percentile for low values
-        # So we rank normally, then the percentile formula gives low rank = low percentile
-        # We then invert: 1 - percentile
         ranks = rankdata(all_values, method='average')
         target_rank = ranks[-1]  # Last element is our value
         percentile = (target_rank - 1) / (n - 1)
         return 1.0 - percentile  # Invert so low value = high percentile
     else:
-        # Higher is better: high values should get high percentile
         ranks = rankdata(all_values, method='average')
         target_rank = ranks[-1]
         percentile = (target_rank - 1) / (n - 1)
         return percentile
-
-
-# =============================================================================
-# Sector Percentile Computation (using effective rank)
-# =============================================================================
 
 def compute_sector_percentiles(
     stock_metrics: pd.DataFrame,
     sp500_reference: pd.DataFrame,
     factor_columns: Optional[list[str]] = None
 ) -> pd.DataFrame:
-    """
-    Compute sector-relative percentiles for stocks against S&P 500 reference.
-    
-    Uses effective rank via scipy's rankdata for proper tie handling.
-    Formula: percentile = (effective_rank - 1) / (n - 1)
-    
-    For each stock, calculates where it ranks (0-1 percentile) among all 
-    S&P 500 stocks in the same sector for each factor.
-    
-    Args:
-        stock_metrics: DataFrame with raw factor values for stocks to score
-                       Must have 'ticker' and 'sector' columns
-        sp500_reference: Full S&P 500 reference DataFrame from get_sp500_sector_scores()
-        factor_columns: List of factor columns to compute percentiles for
-                        If None, uses default factor columns
-    
-    Returns:
-        DataFrame with same tickers as input, with added _score columns
-        containing sector-relative percentile scores (0-1)
-    """
+
     if stock_metrics.empty or sp500_reference.empty:
         return stock_metrics.copy()
     
@@ -895,20 +678,14 @@ def compute_sector_percentiles(
         print("[sector_cache] WARNING: sp500_reference missing 'sector' column")
         return stock_metrics.copy()
     
-    # Default factor columns
     if factor_columns is None:
         factor_columns = [
-            # Value (higher is better)
             "bp_ratio", "ep_ratio", "fcfp_ratio",
-            # Quality (higher is better, except debt_to_equity)
             "roe", "roa", "gross_margin", "fcf_margin", "debt_to_equity",
-            # Momentum (higher is better)
             "momentum_60d",
-            # Low Vol (lower is better)
             "volatility_60d",
         ]
     
-    # Filter to columns that exist in both DataFrames
     available_factors = [c for c in factor_columns 
                          if c in stock_metrics.columns and c in sp500_reference.columns]
     
@@ -916,7 +693,6 @@ def compute_sector_percentiles(
         print("[sector_cache] WARNING: No common factor columns found")
         return stock_metrics.copy()
     
-    # Define which factors should be ranked ascending (lower is better)
     ascending_factors = {"debt_to_equity", "volatility_60d"}
     
     result = stock_metrics.copy()
@@ -926,17 +702,13 @@ def compute_sector_percentiles(
         sector = row.get("sector")
         
         if pd.isna(sector) or sector is None:
-            # No sector - compare against entire S&P 500
             sector_peers = sp500_reference
         else:
-            # Get all S&P 500 stocks in same sector
             sector_peers = sp500_reference[sp500_reference["sector"] == sector]
         
         if sector_peers.empty:
-            # Fallback to entire S&P 500 if sector has no peers
             sector_peers = sp500_reference
         
-        # Compute percentile for each factor using effective rank
         for factor in available_factors:
             stock_value = row.get(factor)
             
@@ -948,11 +720,9 @@ def compute_sector_percentiles(
             if len(peer_values) == 0:
                 continue
             
-            # Use effective rank percentile
             is_ascending = factor in ascending_factors
             percentile = _effective_rank_percentile(stock_value, peer_values, ascending=is_ascending)
             
-            # Update result
             result.loc[result["ticker"] == ticker, f"{factor}_score"] = percentile
     
     return result
@@ -964,24 +734,10 @@ def get_sector_percentile_for_ticker(
     raw_metrics: dict,
     sp500_reference: pd.DataFrame
 ) -> dict:
-    """
-    Convenience function to get sector percentiles for a single ticker.
-    
-    Uses effective rank via scipy's rankdata for proper tie handling.
-    
-    Args:
-        ticker: Stock ticker symbol
-        sector: Sector classification
-        raw_metrics: Dictionary of raw factor values for the stock
-        sp500_reference: Full S&P 500 reference DataFrame
-    
-    Returns:
-        Dictionary mapping factor names to percentile scores (0-1)
-    """
+
     if sp500_reference.empty:
         return {}
     
-    # Get sector peers
     if pd.isna(sector) or sector is None:
         sector_peers = sp500_reference
     else:
