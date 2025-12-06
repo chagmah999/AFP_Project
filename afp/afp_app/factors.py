@@ -5,7 +5,7 @@ Factor metric computation and portfolio construction.
 
 This module provides:
 1. Raw factor metric computation (ratios, returns, volatility)
-2. Percentile ranking (universe-only or sector-relative via S&P 500 reference)
+2. Percentile ranking using effective rank (via scipy rankdata)
 3. Factor portfolio construction (long-short portfolios)
 4. Factor return calculation
 """
@@ -13,6 +13,7 @@ This module provides:
 import numpy as np
 import pandas as pd
 from typing import Optional
+from scipy.stats import rankdata
 
 
 def _safe_div(num, den):
@@ -23,6 +24,109 @@ def _safe_div(num, den):
         out = num / den
     out[~np.isfinite(out)] = np.nan
     return out
+
+
+# =============================================================================
+# EFFECTIVE RANK PERCENTILE FUNCTIONS (using scipy rankdata)
+# =============================================================================
+
+def _rank_pct(series: pd.Series, ascending: bool = True) -> pd.Series:
+    """
+    Compute percentile rank (0-1) for a series using effective rank.
+    
+    Uses scipy's rankdata with method='average' to handle ties properly,
+    then converts to percentile using (rank - 1) / (n - 1).
+    
+    Args:
+        series: Values to rank
+        ascending: If True, lower values get lower ranks (higher percentile means higher value)
+                   If False, higher values get lower ranks (higher percentile means lower value)
+    
+    Returns:
+        Series of percentile ranks (0 to 1)
+    """
+    valid_mask = series.notna()
+    if valid_mask.sum() < 2:
+        return pd.Series(index=series.index, data=np.nan)
+    
+    result = pd.Series(index=series.index, data=np.nan)
+    valid_values = series[valid_mask].values
+    
+    # Get effective ranks using scipy (handles ties with averaging)
+    if ascending:
+        # Lower values get lower ranks
+        ranks = rankdata(valid_values, method='average')
+    else:
+        # Higher values get lower ranks (invert by ranking negative values)
+        ranks = rankdata(-valid_values, method='average')
+    
+    # Convert to percentile: (rank - 1) / (n - 1)
+    n = len(valid_values)
+    if n > 1:
+        percentiles = (ranks - 1) / (n - 1)
+    else:
+        percentiles = np.array([0.5])  # Single value gets 0.5
+    
+    result.loc[valid_mask] = percentiles
+    return result
+
+
+def _effective_rank_percentile(value: float, peer_values: np.ndarray, ascending: bool = True) -> float:
+    """
+    Compute the effective rank percentile of a single value against a peer group.
+    
+    Uses scipy's rankdata with method='average' for proper tie handling.
+    Formula: percentile = (effective_rank - 1) / (n - 1)
+    
+    Args:
+        value: The value to rank
+        peer_values: Array of peer values to rank against
+        ascending: If True, lower values are "better" (get higher percentile when inverted)
+                   If False, higher values are "better" (get higher percentile)
+    
+    Returns:
+        Percentile (0 to 1) where higher means "better" for the factor
+    """
+    if pd.isna(value) or len(peer_values) == 0:
+        return np.nan
+    
+    # Remove NaN from peers
+    peer_values = peer_values[~np.isnan(peer_values)]
+    
+    if len(peer_values) == 0:
+        return np.nan
+    
+    # Combine value with peers for ranking
+    all_values = np.append(peer_values, value)
+    n = len(all_values)
+    
+    if n == 1:
+        return 0.5  # Single value
+    
+    # Rank all values (including the target)
+    if ascending:
+        # Lower is better: we want high percentile for low values
+        # So we rank normally, then the percentile formula gives low rank = low percentile
+        # We then invert: 1 - percentile
+        ranks = rankdata(all_values, method='average')
+        target_rank = ranks[-1]  # Last element is our value
+        percentile = (target_rank - 1) / (n - 1)
+        return 1.0 - percentile  # Invert so low value = high percentile
+    else:
+        # Higher is better: high values should get high percentile
+        ranks = rankdata(all_values, method='average')
+        target_rank = ranks[-1]
+        percentile = (target_rank - 1) / (n - 1)
+        return percentile
+
+
+def _zscore_grouped(series: pd.Series) -> pd.Series:
+    """Compute z-score within a group."""
+    mu = series.mean()
+    sigma = series.std(ddof=0)
+    if sigma == 0 or np.isnan(sigma):
+        return pd.Series(index=series.index, data=np.nan)
+    return (series - mu) / sigma
 
 
 # =============================================================================
@@ -230,20 +334,6 @@ def calculate_raw_factor_metrics(
 # PERCENTILE RANKING FUNCTIONS
 # =============================================================================
 
-def _rank_pct(series: pd.Series, ascending: bool = True) -> pd.Series:
-    """Compute percentile rank (0-1) for a series."""
-    return series.rank(method="average", pct=True, ascending=ascending)
-
-
-def _zscore_grouped(series: pd.Series) -> pd.Series:
-    """Compute z-score within a group."""
-    mu = series.mean()
-    sigma = series.std(ddof=0)
-    if sigma == 0 or np.isnan(sigma):
-        return pd.Series(index=series.index, data=np.nan)
-    return (series - mu) / sigma
-
-
 def compute_universe_percentiles(
     metrics: pd.DataFrame,
     group_by_sector: bool = True
@@ -251,8 +341,7 @@ def compute_universe_percentiles(
     """
     Compute percentile scores relative to the provided universe only.
     
-    This is the ORIGINAL behavior - ranking stocks only against others
-    in the same DataFrame.
+    Uses effective rank via scipy's rankdata for proper tie handling.
     
     Args:
         metrics: DataFrame from calculate_raw_factor_metrics()
@@ -276,6 +365,7 @@ def compute_universe_percentiles(
         group_cols = []
 
     def _group_rank(df: pd.DataFrame, col_name: str, ascending: bool = True) -> pd.Series:
+        """Rank within groups using effective rank."""
         if col_name not in df.columns:
             return pd.Series(index=df.index, data=np.nan)
         if group_cols:
@@ -324,10 +414,11 @@ def compute_universe_percentiles(
     if value_components:
         metrics["value_raw"] = metrics[value_components].mean(axis=1, skipna=True)
 
+        # Use effective rank for value score (higher raw = higher score)
         if group_cols:
             metrics["value_score"] = (
                 metrics.groupby(group_cols)["value_raw"]
-                .transform(lambda s: s.rank(method="average", pct=True, ascending=False))
+                .transform(lambda s: _rank_pct(s, ascending=False))
             )
         else:
             metrics["value_score"] = _rank_pct(metrics["value_raw"], ascending=False)
@@ -338,25 +429,24 @@ def compute_universe_percentiles(
     quality_components = []
 
     if "roe" in metrics.columns:
-        metrics["q_roe"] = _group_rank(metrics, "roe", ascending=True)
+        metrics["q_roe"] = _group_rank(metrics, "roe", ascending=False)  # Higher is better
         quality_components.append("q_roe")
 
     if "roa" in metrics.columns:
-        metrics["q_roa"] = _group_rank(metrics, "roa", ascending=True)
+        metrics["q_roa"] = _group_rank(metrics, "roa", ascending=False)  # Higher is better
         quality_components.append("q_roa")
 
     if "gross_margin" in metrics.columns:
-        metrics["q_gm"] = _group_rank(metrics, "gross_margin", ascending=True)
+        metrics["q_gm"] = _group_rank(metrics, "gross_margin", ascending=False)  # Higher is better
         quality_components.append("q_gm")
 
     if "fcf_margin" in metrics.columns:
-        metrics["q_fcfm"] = _group_rank(metrics, "fcf_margin", ascending=True)
+        metrics["q_fcfm"] = _group_rank(metrics, "fcf_margin", ascending=False)  # Higher is better
         quality_components.append("q_fcfm")
 
     if "debt_to_equity" in metrics.columns:
         # Lower debt is better
-        lev_rank = _group_rank(metrics, "debt_to_equity", ascending=True)
-        metrics["q_levinv"] = 1.0 - lev_rank
+        metrics["q_levinv"] = _group_rank(metrics, "debt_to_equity", ascending=True)
         quality_components.append("q_levinv")
 
     if quality_components:
@@ -366,14 +456,13 @@ def compute_universe_percentiles(
     # LOW VOLATILITY SCORE (lower vol = higher score)
     # =========================================================================
     if "volatility_60d" in metrics.columns:
-        vol_rank = _group_rank(metrics, "volatility_60d", ascending=True)
-        metrics["lowvol_score"] = 1.0 - vol_rank
+        metrics["lowvol_score"] = _group_rank(metrics, "volatility_60d", ascending=True)
 
     # =========================================================================
     # MOMENTUM SCORE (higher momentum = higher score)
     # =========================================================================
     if "momentum_60d" in metrics.columns:
-        metrics["momentum_score"] = _group_rank(metrics, "momentum_60d", ascending=True)
+        metrics["momentum_score"] = _group_rank(metrics, "momentum_60d", ascending=False)
 
     return metrics
 
@@ -385,8 +474,8 @@ def compute_sector_relative_percentiles(
     """
     Compute percentile scores relative to ALL S&P 500 stocks in the same sector.
     
-    This is the NEW behavior - ranking each stock in the user's universe 
-    against all ~500 S&P 500 stocks with the same sector.
+    Uses effective rank via scipy's rankdata for proper tie handling.
+    Formula: percentile = (effective_rank - 1) / (n - 1)
     
     Args:
         universe_metrics: DataFrame from calculate_raw_factor_metrics() for user's universe
@@ -440,7 +529,7 @@ def compute_sector_relative_percentiles(
                 sector_peers = sp500_reference
         
         # ---------------------------------------------------------------------
-        # VALUE SCORE
+        # VALUE SCORE (using effective rank)
         # ---------------------------------------------------------------------
         value_percentiles = []
         for metric in value_metrics:
@@ -449,20 +538,21 @@ def compute_sector_relative_percentiles(
             if metric not in sector_peers.columns:
                 continue
             
-            peer_values = sector_peers[metric].dropna()
-            if peer_values.empty:
+            peer_values = sector_peers[metric].dropna().values
+            if len(peer_values) == 0:
                 continue
             
             stock_value = row[metric]
             # Higher is better for value metrics
-            percentile = (peer_values < stock_value).sum() / len(peer_values)
-            value_percentiles.append(percentile)
+            percentile = _effective_rank_percentile(stock_value, peer_values, ascending=False)
+            if not np.isnan(percentile):
+                value_percentiles.append(percentile)
         
         if value_percentiles:
             result.loc[idx, "value_score"] = np.mean(value_percentiles)
         
         # ---------------------------------------------------------------------
-        # QUALITY SCORE
+        # QUALITY SCORE (using effective rank)
         # ---------------------------------------------------------------------
         quality_percentiles = []
         for metric in quality_metrics:
@@ -471,26 +561,24 @@ def compute_sector_relative_percentiles(
             if metric not in sector_peers.columns:
                 continue
             
-            peer_values = sector_peers[metric].dropna()
-            if peer_values.empty:
+            peer_values = sector_peers[metric].dropna().values
+            if len(peer_values) == 0:
                 continue
             
             stock_value = row[metric]
             
-            if metric in ascending_metrics:
-                # Lower is better (debt_to_equity)
-                percentile = (peer_values > stock_value).sum() / len(peer_values)
-            else:
-                # Higher is better
-                percentile = (peer_values < stock_value).sum() / len(peer_values)
-            
-            quality_percentiles.append(percentile)
+            # debt_to_equity: lower is better
+            # others: higher is better
+            is_ascending = metric in ascending_metrics
+            percentile = _effective_rank_percentile(stock_value, peer_values, ascending=is_ascending)
+            if not np.isnan(percentile):
+                quality_percentiles.append(percentile)
         
         if quality_percentiles:
             result.loc[idx, "quality_score"] = np.mean(quality_percentiles)
         
         # ---------------------------------------------------------------------
-        # MOMENTUM SCORE
+        # MOMENTUM SCORE (using effective rank)
         # ---------------------------------------------------------------------
         for metric in momentum_metrics:
             if metric not in row or pd.isna(row[metric]):
@@ -498,17 +586,17 @@ def compute_sector_relative_percentiles(
             if metric not in sector_peers.columns:
                 continue
             
-            peer_values = sector_peers[metric].dropna()
-            if peer_values.empty:
+            peer_values = sector_peers[metric].dropna().values
+            if len(peer_values) == 0:
                 continue
             
             stock_value = row[metric]
             # Higher is better for momentum
-            percentile = (peer_values < stock_value).sum() / len(peer_values)
+            percentile = _effective_rank_percentile(stock_value, peer_values, ascending=False)
             result.loc[idx, "momentum_score"] = percentile
         
         # ---------------------------------------------------------------------
-        # LOW VOLATILITY SCORE
+        # LOW VOLATILITY SCORE (using effective rank)
         # ---------------------------------------------------------------------
         for metric in lowvol_metrics:
             if metric not in row or pd.isna(row[metric]):
@@ -516,13 +604,13 @@ def compute_sector_relative_percentiles(
             if metric not in sector_peers.columns:
                 continue
             
-            peer_values = sector_peers[metric].dropna()
-            if peer_values.empty:
+            peer_values = sector_peers[metric].dropna().values
+            if len(peer_values) == 0:
                 continue
             
             stock_value = row[metric]
             # Lower is better for volatility
-            percentile = (peer_values > stock_value).sum() / len(peer_values)
+            percentile = _effective_rank_percentile(stock_value, peer_values, ascending=True)
             result.loc[idx, "lowvol_score"] = percentile
     
     return result
