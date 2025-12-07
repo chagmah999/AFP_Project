@@ -269,9 +269,9 @@ def load_sp500_reference_cache(
         return pd.DataFrame()
 
 
-st.set_page_config(page_title="AFP Forecasting Tool", layout="wide")
+st.set_page_config(page_title="MarketMancer", layout="wide")
 
-st.title("AFP Forecasting Tool")
+st.title("MarketMancer")
 st.caption("Factor premia forecasts, stock-level alpha, and unified portfolio optimization")
 
 for key, default in [
