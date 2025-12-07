@@ -727,14 +727,19 @@ else:
                     "Cumulative growth of one unit invested in each factor "
                     "long short portfolio over time."
                 )
+            
+                # Convert cumulative returns to a wealth index and clip at a small positive floor
                 wealth_paths = (1.0 + cum_paths).clip(lower=1e-6)
-
-                df_wealth = (
-                    wealth_paths
-                    .reset_index()
-                    .melt(id_vars="index", var_name="Factor", value_name="Wealth")
-                    .rename(columns={"index": "date"})
-                )
+            
+                # Reset index and detect the date column name robustly
+                df_wealth = wealth_paths.reset_index()
+                date_col = df_wealth.columns[0]
+            
+                df_wealth = df_wealth.melt(
+                    id_vars=date_col,
+                    var_name="Factor",
+                    value_name="Wealth",
+                ).rename(columns={date_col: "date"})
             
                 chart = (
                     alt.Chart(df_wealth)
@@ -744,7 +749,7 @@ else:
                         y=alt.Y(
                             "Wealth:Q",
                             title="Cumulative wealth (log scale)",
-                            scale=alt.Scale(type="log")
+                            scale=alt.Scale(type="log"),
                         ),
                         color=alt.Color("Factor:N", title="Factor"),
                         tooltip=[
@@ -757,6 +762,7 @@ else:
                 )
             
                 st.altair_chart(chart, use_container_width=True)
+
     else:
         st.info(
             "No historical factor returns are available yet. "
