@@ -3,6 +3,7 @@ import time
 import numpy as np
 import pandas as pd
 import streamlit as st
+import altair as alt
 
 from afp_app.config import (
     FMP_API_KEY,
@@ -726,7 +727,36 @@ else:
                     "Cumulative growth of one unit invested in each factor "
                     "long short portfolio over time."
                 )
-                st.line_chart(cum_paths)
+                wealth_paths = (1.0 + cum_paths).clip(lower=1e-6)
+
+                df_wealth = (
+                    wealth_paths
+                    .reset_index()
+                    .melt(id_vars="index", var_name="Factor", value_name="Wealth")
+                    .rename(columns={"index": "date"})
+                )
+            
+                chart = (
+                    alt.Chart(df_wealth)
+                    .mark_line()
+                    .encode(
+                        x=alt.X("date:T", title="Date"),
+                        y=alt.Y(
+                            "Wealth:Q",
+                            title="Cumulative wealth (log scale)",
+                            scale=alt.Scale(type="log")
+                        ),
+                        color=alt.Color("Factor:N", title="Factor"),
+                        tooltip=[
+                            alt.Tooltip("date:T", title="Date"),
+                            alt.Tooltip("Factor:N", title="Factor"),
+                            alt.Tooltip("Wealth:Q", title="Wealth", format=".2f"),
+                        ],
+                    )
+                    .properties(height=300)
+                )
+            
+                st.altair_chart(chart, use_container_width=True)
     else:
         st.info(
             "No historical factor returns are available yet. "
