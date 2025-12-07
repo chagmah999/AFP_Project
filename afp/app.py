@@ -676,15 +676,17 @@ else:
 
         if not perf_summary.empty:
             st.subheader("Historical factor performance")
+            st.caption("How have these factor portfolios actually behaved over time?")
 
-            st.caption(
-                "This section summarizes how each long short factor portfolio "
-                "has performed over the full sample used in the model. "
-                "For each factor, we show total and annualized returns, "
-                "annualized volatility, a Sharpe ratio computed relative to the "
-                "available daily risk free series when present (otherwise zero), "
-                "and the worst peak to trough drawdown over the period."
-            )
+            with st.expander("Details"):
+                st.caption(
+                    "This section summarizes how each long short factor portfolio "
+                    "has performed over the full sample used in the model. "
+                    "For each factor, we show total and annualized returns, "
+                    "annualized volatility, a Sharpe ratio computed relative to the "
+                    "available daily risk free series when present (otherwise zero), "
+                    "and the worst peak to trough drawdown over the period."
+                )
 
             perf_display = perf_summary.copy()
             perf_display["Total return %"] = perf_display["total_return"] * 100.0
@@ -732,15 +734,17 @@ else:
         )
 
     st.subheader("Factor premia forecasts")
+    st.caption("Which factor styles look poised to outperform next?")
 
     if forecasts:
-        st.caption(
-            "These forecasts estimate each factor's expected return (in percent) over the next *H* days, "
-            "where *H* is the forecast horizon set by the user. The primary forecast uses a simple AR(1) "
-            "model on each factor's own history, while macro features are used for diagnostics and driver "
-            "analysis. Higher values indicate a stronger expected tailwind for that factor (candidates to "
-            "overweight), while negative values indicate expected headwinds (candidates to underweight)."
-        )
+        with st.expander("Details"):
+            st.caption(
+                "These forecasts estimate each factor's expected return (in percent) over the next *H* days, "
+                "where *H* is the forecast horizon set by the user. The primary forecast uses a simple AR(1) "
+                "model on each factor's own history, while macro features are used for diagnostics and driver "
+                "analysis. Higher values indicate a stronger expected tailwind for that factor (candidates to "
+                "overweight), while negative values indicate expected headwinds (candidates to underweight)."
+            )
 
         summary_rows = []
         drivers_rows = []
@@ -803,15 +807,18 @@ else:
 
         if drivers_rows:
             st.subheader("Top drivers per factor")
-            st.caption(
-                "The table below shows which macro features the model found most predictive "
-                "when forecasting each factor's expected return over the next *H* days. "
-                "These macro features include rate levels, "
-                "term spreads, credit spreads, and volatility measures. More technically, "
-                "'most predictive' means these features produced the largest reductions in forecast "
-                "error in the random forest model, with RF importance measuring the average improvement "
-                "in fit when that feature is used across the trees."
-            )
+            st.caption("What macro forces are actually moving these factors?")
+
+            with st.expander("Details"):
+                st.caption(
+                    "The table below shows which macro features the model found most predictive "
+                    "when forecasting each factor's expected return over the next *H* days. "
+                    "These macro features include rate levels, "
+                    "term spreads, credit spreads, and volatility measures. More technically, "
+                    "'most predictive' means these features produced the largest reductions in forecast "
+                    "error in the random forest model, with RF importance measuring the average improvement "
+                    "in fit when that feature is used across the trees."
+                )
 
             df_drivers = pd.DataFrame(drivers_rows)
             st.dataframe(
@@ -821,15 +828,18 @@ else:
 
         if factor_eval:
             st.markdown("### Factor signal validation (walk-forward)")
-            st.caption(
-                "This section evaluates how well the forecasting models would have performed historically "
-                "using walk-forward validation. The data is split into several consecutive train-test windows: "
-                "for each window, the models are trained on past data and then tested only on the period that "
-                "comes immediately after it, mimicking real-time forecasting. We report accuracy for two models: "
-                "a simple AR(1) baseline and a three-model machine-learning ensemble (Ridge, Lasso, Random Forest). "
-                "For each, we show the direction hit rate (how often the model correctly predicted the sign of the "
-                "factor's forward return), as well as RMSE and MAE to measure numerical forecast error. "
-            )
+            st.caption("Can I trust these factor forecasts out of sample?")
+
+            with st.expander("Details"):
+                st.caption(
+                    "This section evaluates how well the forecasting models would have performed historically "
+                    "using walk-forward validation. The data is split into several consecutive train-test windows: "
+                    "for each window, the models are trained on past data and then tested only on the period that "
+                    "comes immediately after it, mimicking real-time forecasting. We report accuracy for two models: "
+                    "a simple AR(1) baseline and a three-model machine-learning ensemble (Ridge, Lasso, Random Forest). "
+                    "For each, we show the direction hit rate (how often the model correctly predicted the sign of the "
+                    "factor's forward return), as well as RMSE and MAE to measure numerical forecast error. "
+                )
 
             eval_rows = []
             for f, s in factor_eval.items():
@@ -953,20 +963,23 @@ else:
                         st.write(", ".join(sorted(sectors)))
 
     st.subheader("Optimized unified portfolio")
+    st.caption("Given all signals together, what long/short portfolio should I actually hold?")
 
     optimized_portfolio = st.session_state.get("optimized_portfolio")
 
     if isinstance(optimized_portfolio, pd.DataFrame) and not optimized_portfolio.empty:
-        st.caption(
-            "This section shows a unified long/short portfolio built from the model's *H*-day stock-level alpha forecasts. "
-            "The optimizer chooses weights that maximize expected *H*-day portfolio alpha relative to portfolio risk, "
-            "where risk is measured using a Ledoit Wolf shrinkage estimate of the recent return covariance matrix. "
-            "Stocks with higher expected alpha and more favorable risk characteristics receive higher positive weights "
-            "(long positions), while stocks with negative expected alpha receive negative weights (short positions). "
-            "For stability, the portfolio enforces practical constraints: no individual position may exceed the per-stock "
-            "weight cap (currently 10 percent), and total gross exposure is limited (currently at 1.5 times the portfolio's "
-            "capital). The table reports each stock's portfolio weight, side, and its own expected *H*-day alpha in percent."
-        )
+        with st.expander("Details"):
+            st.caption(
+                "This section shows a unified long/short portfolio built from the model's *H*-day stock-level alpha forecasts. "
+                "The optimizer chooses weights that maximize expected *H*-day portfolio alpha relative to portfolio risk, "
+                "where risk is measured using a Ledoit Wolf shrinkage estimate of the recent return covariance matrix. "
+                "Stocks with higher expected alpha and more favorable risk characteristics receive higher positive weights "
+                "(long positions), while stocks with negative expected alpha receive negative weights (short positions). "
+                "For stability, the portfolio enforces practical constraints: no individual position may exceed the per-stock "
+                "weight cap (currently 10 percent), and total gross exposure is limited (currently at 1.5 times the portfolio's "
+                "capital). The table reports each stock's portfolio weight, side, and its own expected *H*-day alpha in percent."
+            )
+
         st.dataframe(
             optimized_portfolio.style.format(
                 {
@@ -1003,13 +1016,16 @@ else:
         )
 
     st.subheader("Alpha predictions (top 10)")
-    st.caption(
-        "This section lists the 10 stocks with the highest expected *H*-day alpha from a Lasso regression that links "
-        "standardized stock characteristics (valuation, quality, momentum, size, etc.) to their future *H*-day returns. "
-        "For each name, the expected alpha is the model's forecast of its *H*-day excess return (in percent) based on "
-        "those historical relationships, and the fundamental score summarizes how attractive its fundamentals look on those "
-        "same dimensions."
-    )
+    st.caption("Which individual stocks show the strongest forward alpha right now?")
+
+    with st.expander("Details"):
+        st.caption(
+            "This section lists the 10 stocks with the highest expected *H*-day alpha from a Lasso regression that links "
+            "standardized stock characteristics (valuation, quality, momentum, size, etc.) to their future *H*-day returns. "
+            "For each name, the expected alpha is the model's forecast of its *H*-day excess return (in percent) based on "
+            "those historical relationships, and the fundamental score summarizes how attractive its fundamentals look on those "
+            "same dimensions."
+        )
 
     if alpha_preds:
         df_alpha = pd.DataFrame(
@@ -1050,13 +1066,16 @@ else:
             pass
 
         st.markdown("**Top drivers for each of the top 10 stocks**")
-        st.caption(
-            "For each stock, the model predicts its expected *H*-day alpha using a Lasso regression trained on "
-            "historical data. All input features are standardized before estimation, so each coefficient measures "
-            "how a one standard deviation increase in that feature changes the stock's predicted *H*-day alpha, "
-            "holding other features fixed. A positive coefficient means higher values of the feature are associated "
-            "with higher predicted alpha, and a negative coefficient means the opposite."
-        )
+        st.caption("Why is the model bullish or bearish on this stock?")
+
+        with st.expander("Details"):
+            st.caption(
+                "For each stock, the model predicts its expected *H*-day alpha using a Lasso regression trained on "
+                "historical data. All input features are standardized before estimation, so each coefficient measures "
+                "how a one standard deviation increase in that feature changes the stock's predicted *H*-day alpha, "
+                "holding other features fixed. A positive coefficient means higher values of the feature are associated "
+                "with higher predicted alpha, and a negative coefficient means the opposite."
+            )
 
         for _, row in df_alpha.head(10).iterrows():
             tk = row["ticker"]
