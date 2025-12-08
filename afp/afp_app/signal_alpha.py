@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LassoCV
+from sklearn.linear_model import LassoCV, RidgeCV
 from sklearn.preprocessing import StandardScaler
 
 class AlphaPredictor:
@@ -16,6 +16,22 @@ class AlphaPredictor:
         self.models = {}
         self.scalers = {}
         self._features_used = {}
+        
+        # Pre-compute fundamental data lookup for efficiency with large universes
+        self._fundamental_cache = {}
+        self._precompute_fundamentals()
+
+    def _precompute_fundamentals(self):
+        """Pre-compute fundamental data indexed by ticker for faster lookups."""
+        for key in ["balance_sheet", "income_statement", "cash_flow"]:
+            df = self.fundamentals.get(key, pd.DataFrame())
+            if not df.empty and "ticker" in df.columns and "date" in df.columns:
+                df = df.copy()
+                df["date"] = pd.to_datetime(df["date"], errors="coerce")
+                df = df.dropna(subset=["date"]).sort_values("date")
+                self._fundamental_cache[key] = df.groupby("ticker")
+            else:
+                self._fundamental_cache[key] = None
 
     @staticmethod
     def _last_before(df, date_col, date_val):
@@ -28,14 +44,26 @@ class AlphaPredictor:
         
         return df.iloc[[-1]] if not df.empty else pd.DataFrame()
 
+    def _get_fundamental_before(self, key: str, ticker: str, asof: pd.Timestamp) -> pd.DataFrame:
+        """Efficiently get the last fundamental record before a given date."""
+        cache = self._fundamental_cache.get(key)
+        if cache is None:
+            return pd.DataFrame()
+        
+        try:
+            group = cache.get_group(ticker)
+            mask = group["date"] <= asof
+            filtered = group[mask]
+            if filtered.empty:
+                return pd.DataFrame()
+            return filtered.iloc[[-1]]
+        except KeyError:
+            return pd.DataFrame()
 
     def _build_fundamental_row(self, ticker: str, asof: pd.Timestamp) -> dict:
-        bs = self.fundamentals.get("balance_sheet", pd.DataFrame())
-        inc = self.fundamentals.get("income_statement", pd.DataFrame())
-        cf  = self.fundamentals.get("cash_flow", pd.DataFrame())
-        bsl = self._last_before(bs[bs.get("ticker", pd.Series(dtype=str)) == ticker].sort_values("date"), "date", asof) if not bs.empty else pd.DataFrame()
-        incl = self._last_before(inc[inc.get("ticker", pd.Series(dtype=str)) == ticker].sort_values("date"), "date", asof) if not inc.empty else pd.DataFrame()
-        cfl = self._last_before(cf[cf.get("ticker", pd.Series(dtype=str)) == ticker].sort_values("date"), "date", asof) if not cf.empty else pd.DataFrame()
+        bsl = self._get_fundamental_before("balance_sheet", ticker, asof)
+        incl = self._get_fundamental_before("income_statement", ticker, asof)
+        cfl = self._get_fundamental_before("cash_flow", ticker, asof)
 
         def gv(d, col):
             return float(d[col].values[0]) if (not d.empty and col in d.columns and pd.notna(d[col].values[0])) else np.nan
@@ -95,26 +123,80 @@ class AlphaPredictor:
             return False
         if "returns" not in px.columns and "close" in px.columns:
             px["returns"] = np.log(px["close"]).diff()
-        px["fwd_21d"] = px["returns"].rolling(self.horizon).sum().shift(-self.horizon)
+        if "returns" not in px.columns:
+            return False
+            
+        px["fwd_ret"] = px["returns"].rolling(self.horizon).sum().shift(-self.horizon)
         end = px["date"].max()
-        start = end - pd.Timedelta(days=int(self.lookback*1.5))
-        px = px[(px["date"] >= start) & (px["date"] <= end)].copy()
-        y = px.set_index("date")["fwd_21d"]
+        
+        # CHANGE 1: More adaptive lookback - use available data more flexibly
+        # Use at least 2x the lookback or all available data, whichever is smaller
+        min_start = end - pd.Timedelta(days=int(self.lookback * 2))
+        px = px[(px["date"] >= min_start) & (px["date"] <= end)].copy()
+        
+        if len(px) < 60:  # Absolute minimum
+            return False
+            
+        y = px.set_index("date")["fwd_ret"]
+        
+        # CHANGE 2: Build features more efficiently using vectorized operations where possible
+        # Sample dates to reduce computation for very long histories
+        dates_to_use = y.index
+        if len(dates_to_use) > 500:
+            # Sample every Nth date to keep ~500 training points
+            step = len(dates_to_use) // 500
+            dates_to_use = dates_to_use[::step]
+        
         rows = []
-        for dt in y.index:
+        for dt in dates_to_use:
             f = self._build_fundamental_row(ticker, dt)
             t = self._build_technical_row(ticker, dt)
             rows.append(pd.Series({**f, **t}, name=dt))
         X = pd.DataFrame(rows).sort_index()
+        
+        # Align y to sampled dates
+        y = y.reindex(X.index)
+        
         df = pd.concat([y, X], axis=1).dropna()
-        if df.shape[0] < 120 or df.shape[1] < 5:
+        
+        # CHANGE 3: Relaxed minimum requirements for training
+        # Reduced from 120 rows and 5 columns to 50 rows and 3 columns
+        min_rows = max(50, self.horizon * 2)  # At least 50 or 2x horizon
+        if df.shape[0] < min_rows or df.shape[1] < 3:
             return False
-        y_tr = df["fwd_21d"].values
-        X_tr = df.drop(columns=["fwd_21d"])
+            
+        y_tr = df["fwd_ret"].values
+        X_tr = df.drop(columns=["fwd_ret"])
+        
+        # Drop columns that are all NaN or have no variance
+        valid_cols = X_tr.columns[X_tr.notna().sum() > len(X_tr) * 0.5]  # At least 50% non-NaN
+        if len(valid_cols) < 2:
+            return False
+        X_tr = X_tr[valid_cols].fillna(X_tr[valid_cols].median())
+        
+        # Check for zero variance columns
+        var = X_tr.var()
+        valid_cols = var[var > 1e-10].index
+        if len(valid_cols) < 2:
+            return False
+        X_tr = X_tr[valid_cols]
+        
         sc = StandardScaler()
         Xs = sc.fit_transform(X_tr)
-        model = LassoCV(cv=5, random_state=42, n_alphas=50, max_iter=20000)
-        model.fit(Xs, y_tr)
+        
+        # CHANGE 4: Use faster model fitting for large universes
+        # Reduced n_alphas and cv folds for speed
+        try:
+            model = LassoCV(cv=3, random_state=42, n_alphas=20, max_iter=5000)
+            model.fit(Xs, y_tr)
+        except Exception:
+            # Fallback to Ridge if Lasso fails
+            try:
+                model = RidgeCV(cv=3)
+                model.fit(Xs, y_tr)
+            except Exception:
+                return False
+        
         self.models[ticker] = model
         self.scalers[ticker] = sc
         self._features_used[ticker] = list(X_tr.columns)
@@ -124,11 +206,14 @@ class AlphaPredictor:
         if horizon is None:
             horizon = self.horizon
         today = pd.Timestamp.today().normalize()
+        
+        # CHANGE 5: Always try to return a prediction, even if model training fails
         if ticker not in self.models:
             if not self.train_ticker(ticker):
+                # Return fallback prediction based on fundamentals
                 feats = self._build_fundamental_row(ticker, today)
                 score = self._fundamental_score(feats)
-                exp = 0.002 * score
+                exp = 0.002 * score  # Simple heuristic: 0.2% per point
                 return {
                     "ticker": ticker,
                     "expected_alpha": float(exp),
@@ -136,20 +221,55 @@ class AlphaPredictor:
                     "confidence": "Low",
                     "drivers": {"fundamental_score": int(score), "key_metrics": feats, "top_features": []}
                 }
+        
+        # If we still don't have a model after training attempt, use fallback
+        if ticker not in self.models:
+            feats = self._build_fundamental_row(ticker, today)
+            score = self._fundamental_score(feats)
+            exp = 0.002 * score
+            return {
+                "ticker": ticker,
+                "expected_alpha": float(exp),
+                "horizon_days": horizon,
+                "confidence": "Low",
+                "drivers": {"fundamental_score": int(score), "key_metrics": feats, "top_features": []}
+            }
+            
         feats_f = self._build_fundamental_row(ticker, today)
         feats_t = self._build_technical_row(ticker, today)
         feats = {**feats_f, **feats_t}
         score = self._fundamental_score(feats)
         cols = self._features_used.get(ticker, [])
+        
+        if not cols:
+            # No features available, use fallback
+            exp = 0.002 * score
+            return {
+                "ticker": ticker,
+                "expected_alpha": float(exp),
+                "horizon_days": horizon,
+                "confidence": "Low",
+                "drivers": {"fundamental_score": int(score), "key_metrics": feats_f, "top_features": []}
+            }
+        
         x = pd.DataFrame([feats], index=[today]).reindex(columns=cols).ffill().bfill().fillna(0)
         sc = self.scalers[ticker]
-        Xs = sc.transform(x.values)
-        model = self.models[ticker]
-        pred = float(model.predict(Xs)[0])
+        
+        try:
+            Xs = sc.transform(x.values)
+            model = self.models[ticker]
+            pred = float(model.predict(Xs)[0])
+        except Exception:
+            # If prediction fails, use fallback
+            pred = 0.002 * score
+            
         coefs = getattr(model, "coef_", np.zeros(len(cols)))
         imp = pd.DataFrame({"feature": cols, "coef": coefs, "abs": np.abs(coefs)}).sort_values("abs", ascending=False)
         top = imp.head(5)[["feature","coef"]].to_dict("records")
-        conf = "High" if float(np.linalg.norm(coefs)) > 0.5 else ("Medium" if float(np.linalg.norm(coefs)) > 0.2 else "Low")
+        
+        coef_norm = float(np.linalg.norm(coefs)) if len(coefs) > 0 else 0.0
+        conf = "High" if coef_norm > 0.5 else ("Medium" if coef_norm > 0.2 else "Low")
+        
         return {
             "ticker": ticker,
             "expected_alpha": pred,
