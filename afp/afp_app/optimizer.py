@@ -57,16 +57,42 @@ class UnifiedPortfolioOptimizer:
 
         pivot = df.pivot(index="date", columns="ticker", values=retcol)
 
-        valid = pivot.count()[pivot.count() >= 50].index.tolist()
+        # CHANGE 1: Adaptive minimum observation threshold
+        # Calculate based on available data - require at least 20% of lookback or 20 obs minimum
+        n_dates = len(pivot)
+        min_obs_required = max(20, int(n_dates * 0.2))  # At least 20 or 20% of available dates
+        
+        # Also cap the requirement based on what's actually available
+        min_obs_required = min(min_obs_required, int(n_dates * 0.8))  # Don't require more than 80% of dates
+        
+        valid = pivot.count()[pivot.count() >= min_obs_required].index.tolist()
 
-        if len(valid) < 2:  
-
-            return pd.DataFrame(), []
+        # CHANGE 2: Reduced minimum from 2 tickers - we can work with just 1 if needed
+        # but for covariance we still need at least 2
+        if len(valid) < 2:
+            # Try with even lower threshold if we have very few tickers
+            min_obs_fallback = max(10, int(n_dates * 0.1))
+            valid = pivot.count()[pivot.count() >= min_obs_fallback].index.tolist()
+            
+            if len(valid) < 2:
+                # Last resort: return empty to trigger fallback optimization
+                return pd.DataFrame(), []
 
         pivot_valid = pivot[valid].fillna(0.0)
 
-        lw = LedoitWolf().fit(pivot_valid.values)
-        Sigma = pd.DataFrame(lw.covariance_, index=valid, columns=valid)
+        # CHANGE 3: Handle edge cases in Ledoit-Wolf fitting
+        try:
+            lw = LedoitWolf().fit(pivot_valid.values)
+            Sigma = pd.DataFrame(lw.covariance_, index=valid, columns=valid)
+        except Exception:
+            # Fallback to simple sample covariance if LW fails
+            try:
+                cov_matrix = pivot_valid.cov().values
+                # Regularize to ensure positive definiteness
+                cov_matrix = cov_matrix + np.eye(len(valid)) * 1e-6
+                Sigma = pd.DataFrame(cov_matrix, index=valid, columns=valid)
+            except Exception:
+                return pd.DataFrame(), []
 
         return Sigma, valid
 
@@ -85,11 +111,13 @@ class UnifiedPortfolioOptimizer:
         if n == 0:
             return pd.Series(dtype=float)
 
+        # CHANGE 4: Better handling when Sigma is empty - use risk-parity-like fallback
         if Sigma is None or Sigma.empty:
             if long_only:
                 raw = np.clip(mu.values, a_min=0.0, a_max=None)
                 if raw.sum() <= 0:
-                    return pd.Series(dtype=float)
+                    # Even if all alphas are negative/zero, allocate equally to best ones
+                    raw = mu.values - mu.values.min() + 1e-6
                 w = raw / raw.sum()
             else:
                 scores = mu.values
@@ -110,7 +138,16 @@ class UnifiedPortfolioOptimizer:
             w = np.clip(w, -self.max_weight, self.max_weight)
             return pd.Series(w, index=tickers, name="weight")
 
-        Sigma = Sigma.loc[mu.index, mu.index]  
+        # Ensure Sigma aligns with mu
+        common_tickers = [t for t in mu.index if t in Sigma.index]
+        if len(common_tickers) < 2:
+            # Fall back to no-covariance optimization
+            return self.optimize(mu, pd.DataFrame(), long_only)
+            
+        mu = mu.loc[common_tickers]
+        Sigma = Sigma.loc[common_tickers, common_tickers]
+        tickers = common_tickers
+        n = len(tickers)
 
         diag = np.diag(Sigma.values)
         diag = np.where(diag <= 0, 1e-6, diag)
@@ -119,6 +156,10 @@ class UnifiedPortfolioOptimizer:
 
             scores = mu.values / np.sqrt(diag)
             scores = np.clip(scores, a_min=0.0, a_max=None)
+            if scores.sum() <= 0:
+                # Fallback: equal weight the top half by alpha
+                scores = mu.values - mu.values.min() + 1e-6
+                scores = np.clip(scores, a_min=0.0, a_max=None)
             if scores.sum() <= 0:
                 return pd.Series(dtype=float)
             w = scores / scores.sum()
@@ -141,6 +182,15 @@ class UnifiedPortfolioOptimizer:
             if neg.sum() > 0:
                 w_short = neg / neg.sum() * target_short
                 w -= w_short
+                
+            # CHANGE 5: If we end up with no positions, fall back to simple alpha-based allocation
+            if np.abs(w).sum() < 1e-10:
+                pos = np.clip(mu.values, a_min=0.0, a_max=None)
+                neg = np.clip(-mu.values, a_min=0.0, a_max=None)
+                if pos.sum() > 0:
+                    w += pos / pos.sum() * target_long
+                if neg.sum() > 0:
+                    w -= neg / neg.sum() * target_short
 
         w = np.clip(w, -self.max_weight, self.max_weight)
 
