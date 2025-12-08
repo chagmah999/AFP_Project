@@ -593,7 +593,9 @@ if run_btn:
 
     # --- START REPLACEMENT CODE (lines 594-660) ---
 
-    status.info("Predicting per-ticker alpha...")
+    status.info("Predicting per-ticker alpha (this may take a few minutes for large universes)...")
+    
+    # Create alpha model - pre-computation happens here
     alpha_model = AlphaPredictor(
         factor_returns,
         fundamentals,
@@ -601,14 +603,19 @@ if run_btn:
         horizon=forecast_horizon,
         lookback=252 * 2,
     )
+    
+    status.info("Alpha model initialized, generating predictions...")
 
     alpha_preds: dict[str, dict] = {}
     
-    # IMPROVEMENT: Add progress tracking for large universes
     total_tickers = len(tickers)
+    progress_bar = st.progress(0, text="Predicting alpha...")
+    
     for i, tk in enumerate(tickers):
-        if i % 50 == 0 and total_tickers > 100:
-            status.info(f"Predicting alpha... ({i}/{total_tickers} tickers)")
+        # Update progress more frequently
+        if i % 10 == 0 or i == total_tickers - 1:
+            pct = (i + 1) / total_tickers
+            progress_bar.progress(pct, text=f"Predicting alpha... ({i + 1}/{total_tickers} tickers)")
         
         res = alpha_model.predict_alpha(tk, horizon=forecast_horizon)
         if res:
@@ -616,13 +623,16 @@ if run_btn:
                 top = res["drivers"].get("top_features", [])
                 res["drivers"]["top_features"] = top[:top_k_drivers]
             alpha_preds[tk] = res
-
+    
+    progress_bar.progress(1.0, text="Alpha predictions complete!")
     st.session_state["base_alpha"] = alpha_preds
     
-    # IMPROVEMENT: Add diagnostic info
+    # Diagnostic info
     if not alpha_preds:
         st.warning(f"No alpha predictions could be generated for any of the {len(tickers)} tickers. "
                    "This may indicate insufficient price or fundamental data.")
+    else:
+        st.success(f"Generated alpha predictions for {len(alpha_preds)}/{len(tickers)} tickers")
 
     status.info("Constructing optimized unified portfolio...")
 
@@ -647,7 +657,7 @@ if run_btn:
                 lookback_days=252,
             )
 
-            # IMPROVEMENT: Better fallback logic when covariance fails
+            # Better fallback logic when covariance fails
             if Sigma is None or Sigma.empty or len(valid_tickers) < 2:
                 # Try optimization without covariance matrix (alpha-only)
                 st.info("Covariance matrix unavailable - using alpha-only optimization")
@@ -694,8 +704,6 @@ if run_btn:
     except Exception as e:
         st.session_state["optimized_portfolio"] = None
         st.warning(f"Error constructing optimized portfolio: {e}")
-        import traceback
-        st.text(traceback.format_exc())  # Add this for debugging
 
 # --- END REPLACEMENT CODE ---
     t1 = time.time()
