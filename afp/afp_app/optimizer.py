@@ -39,47 +39,44 @@ class UnifiedPortfolioOptimizer:
         tickers: List[str],
         lookback_days: int = 252,
     ) -> tuple[pd.DataFrame, List[str]]:
-      
+        
         if price_data is None or price_data.empty:
             return pd.DataFrame(), []
-
+    
         df = price_data[price_data["ticker"].isin(tickers)].copy()
         if df.empty:
             return pd.DataFrame(), []
-
+    
         df = df.sort_values("date")
         retcol = "log_returns" if "log_returns" in df.columns else "returns"
-
+    
         unique_dates = df["date"].drop_duplicates().sort_values()
         if len(unique_dates) > lookback_days:
             cutoff = unique_dates.iloc[-lookback_days]
             df = df[df["date"] >= cutoff]
-
+    
         pivot = df.pivot(index="date", columns="ticker", values=retcol)
-
-        # Require a reasonable but not overly strict minimum number of observations
-        min_obs = min(50, max(20, lookback_days // 4))
-        valid = pivot.count()[pivot.count() >= min_obs].index.tolist()
+    
+        # CHANGE: Scale minimum observations with lookback period
+        # For longer lookbacks, we can afford to require more data
+        # For shorter lookbacks, be more lenient
+        min_obs = min(30, max(20, lookback_days // 8))
         
-        if len(valid) < 2:
-            # As a last resort, try using all tickers with any data and build a diagonal covariance
-            any_valid = pivot.count()[pivot.count() >= 5].index.tolist()
-            if len(any_valid) < 2:
+        valid = pivot.count()[pivot.count() >= min_obs].index.tolist()
+    
+        if len(valid) < 2:  
+            # If we don't have enough valid tickers, try being more lenient
+            min_obs = 15
+            valid = pivot.count()[pivot.count() >= min_obs].index.tolist()
+            if len(valid) < 2:
                 return pd.DataFrame(), []
-            sub = pivot[any_valid].dropna(how="all")
-            # Fill missing returns with zeros for this crude fallback
-            sub = sub.fillna(0.0)
-            diag = sub.var(ddof=1).values
-            Sigma_fallback = np.diag(diag)
-            Sigma_df = pd.DataFrame(Sigma_fallback, index=any_valid, columns=any_valid)
-            return Sigma_df, any_valid
-
-
+    
         pivot_valid = pivot[valid].fillna(0.0)
-
+    
+        # Use Ledoit-Wolf shrinkage for robust covariance estimation
         lw = LedoitWolf().fit(pivot_valid.values)
         Sigma = pd.DataFrame(lw.covariance_, index=valid, columns=valid)
-
+    
         return Sigma, valid
 
     def optimize(
