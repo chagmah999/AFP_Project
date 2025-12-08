@@ -591,6 +591,8 @@ if run_btn:
     st.session_state["base_forecasts"] = forecasts
     st.session_state["base_factor_eval"] = factor_eval
 
+    # --- START REPLACEMENT CODE (lines 594-660) ---
+
     status.info("Predicting per-ticker alpha...")
     alpha_model = AlphaPredictor(
         factor_returns,
@@ -601,8 +603,13 @@ if run_btn:
     )
 
     alpha_preds: dict[str, dict] = {}
-
-    for tk in tickers:
+    
+    # IMPROVEMENT: Add progress tracking for large universes
+    total_tickers = len(tickers)
+    for i, tk in enumerate(tickers):
+        if i % 50 == 0 and total_tickers > 100:
+            status.info(f"Predicting alpha... ({i}/{total_tickers} tickers)")
+        
         res = alpha_model.predict_alpha(tk, horizon=forecast_horizon)
         if res:
             if "drivers" in res:
@@ -611,6 +618,11 @@ if run_btn:
             alpha_preds[tk] = res
 
     st.session_state["base_alpha"] = alpha_preds
+    
+    # IMPROVEMENT: Add diagnostic info
+    if not alpha_preds:
+        st.warning(f"No alpha predictions could be generated for any of the {len(tickers)} tickers. "
+                   "This may indicate insufficient price or fundamental data.")
 
     status.info("Constructing optimized unified portfolio...")
 
@@ -635,12 +647,35 @@ if run_btn:
                 lookback_days=252,
             )
 
+            # IMPROVEMENT: Better fallback logic when covariance fails
             if Sigma is None or Sigma.empty or len(valid_tickers) < 2:
-                st.session_state["optimized_portfolio"] = None
+                # Try optimization without covariance matrix (alpha-only)
+                st.info("Covariance matrix unavailable - using alpha-only optimization")
+                weights = optimizer.optimize(mu=mu, Sigma=pd.DataFrame())
+                
+                if not weights.empty:
+                    port_table = optimizer.build_portfolio_table(
+                        weights=weights,
+                        alpha_preds=alpha_preds,
+                    )
+                    st.session_state["optimized_portfolio"] = port_table
+                else:
+                    st.session_state["optimized_portfolio"] = None
             else:
                 common = [tk for tk in valid_tickers if tk in mu.index]
                 if len(common) < 2:
-                    st.session_state["optimized_portfolio"] = None
+                    # Fallback to alpha-only optimization
+                    st.info("Insufficient common tickers - using alpha-only optimization")
+                    weights = optimizer.optimize(mu=mu, Sigma=pd.DataFrame())
+                    
+                    if not weights.empty:
+                        port_table = optimizer.build_portfolio_table(
+                            weights=weights,
+                            alpha_preds=alpha_preds,
+                        )
+                        st.session_state["optimized_portfolio"] = port_table
+                    else:
+                        st.session_state["optimized_portfolio"] = None
                 else:
                     mu_use = mu.loc[common]
                     Sigma_use = Sigma.loc[common, common]
@@ -654,11 +689,15 @@ if run_btn:
                     st.session_state["optimized_portfolio"] = port_table
         else:
             st.session_state["optimized_portfolio"] = None
+            st.warning("No tickers with alpha predictions available for portfolio optimization.")
 
     except Exception as e:
         st.session_state["optimized_portfolio"] = None
         st.warning(f"Error constructing optimized portfolio: {e}")
+        import traceback
+        st.text(traceback.format_exc())  # Add this for debugging
 
+# --- END REPLACEMENT CODE ---
     t1 = time.time()
     st.success(f"Pipeline completed in {t1 - t0:.1f} seconds.")
 
