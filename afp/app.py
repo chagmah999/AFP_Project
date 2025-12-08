@@ -603,49 +603,14 @@ if run_btn:
     alpha_preds: dict[str, dict] = {}
 
     for tk in tickers:
-        try:
-            res = alpha_model.predict_alpha(tk, horizon=forecast_horizon)
-        except Exception as e:
-            # Last-ditch fallback: treat this ticker as having zero alpha and no drivers
-            res = None
-    
+        res = alpha_model.predict_alpha(tk, horizon=forecast_horizon)
         if res:
-            # Trim top drivers for display
             if "drivers" in res:
                 top = res["drivers"].get("top_features", [])
                 res["drivers"]["top_features"] = top[:top_k_drivers]
             alpha_preds[tk] = res
-    
-    # If for some reason nothing came back, fall back to pure fundamentals
-    if not alpha_preds:
-        import pandas as pd
-    
-        today = pd.Timestamp.today().normalize()
-        for tk in tickers:
-            try:
-                # Reuse AlphaPredictor internals for a simple deterministic fallback
-                feats = alpha_model._build_fundamental_row(tk, today)
-                score = alpha_model._fundamental_score(feats)
-            except Exception:
-                feats = {}
-                score = 0
-    
-            exp = 0.002 * score  # same scaling as inside AlphaPredictor
-    
-            alpha_preds[tk] = {
-                "ticker": tk,
-                "expected_alpha": float(exp),
-                "horizon_days": int(forecast_horizon),
-                "confidence": "Low",
-                "drivers": {
-                    "fundamental_score": int(score),
-                    "key_metrics": feats,
-                    "top_features": [],
-                },
-            }
-    
-    st.session_state["base_alpha"] = alpha_preds
 
+    st.session_state["base_alpha"] = alpha_preds
 
     status.info("Constructing optimized unified portfolio...")
 
