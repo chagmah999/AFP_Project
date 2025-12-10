@@ -57,20 +57,14 @@ class UnifiedPortfolioOptimizer:
 
         pivot = df.pivot(index="date", columns="ticker", values=retcol)
 
-        # CHANGE 1: Adaptive minimum observation threshold
-        # Calculate based on available data - require at least 20% of lookback or 20 obs minimum
         n_dates = len(pivot)
         min_obs_required = max(20, int(n_dates * 0.2))  # At least 20 or 20% of available dates
         
-        # Also cap the requirement based on what's actually available
         min_obs_required = min(min_obs_required, int(n_dates * 0.8))  # Don't require more than 80% of dates
         
         valid = pivot.count()[pivot.count() >= min_obs_required].index.tolist()
 
-        # CHANGE 2: Reduced minimum from 2 tickers - we can work with just 1 if needed
-        # but for covariance we still need at least 2
         if len(valid) < 2:
-            # Try with even lower threshold if we have very few tickers
             min_obs_fallback = max(10, int(n_dates * 0.1))
             valid = pivot.count()[pivot.count() >= min_obs_fallback].index.tolist()
             
@@ -80,12 +74,10 @@ class UnifiedPortfolioOptimizer:
 
         pivot_valid = pivot[valid].fillna(0.0)
 
-        # CHANGE 3: Handle edge cases in Ledoit-Wolf fitting
         try:
             lw = LedoitWolf().fit(pivot_valid.values)
             Sigma = pd.DataFrame(lw.covariance_, index=valid, columns=valid)
         except Exception:
-            # Fallback to simple sample covariance if LW fails
             try:
                 cov_matrix = pivot_valid.cov().values
                 # Regularize to ensure positive definiteness
@@ -111,7 +103,6 @@ class UnifiedPortfolioOptimizer:
         if n == 0:
             return pd.Series(dtype=float)
 
-        # CHANGE 4: Better handling when Sigma is empty - use risk-parity-like fallback
         if Sigma is None or Sigma.empty:
             if long_only:
                 raw = np.clip(mu.values, a_min=0.0, a_max=None)
@@ -138,7 +129,6 @@ class UnifiedPortfolioOptimizer:
             w = np.clip(w, -self.max_weight, self.max_weight)
             return pd.Series(w, index=tickers, name="weight")
 
-        # Ensure Sigma aligns with mu
         common_tickers = [t for t in mu.index if t in Sigma.index]
         if len(common_tickers) < 2:
             # Fall back to no-covariance optimization
@@ -183,7 +173,6 @@ class UnifiedPortfolioOptimizer:
                 w_short = neg / neg.sum() * target_short
                 w -= w_short
                 
-            # CHANGE 5: If we end up with no positions, fall back to simple alpha-based allocation
             if np.abs(w).sum() < 1e-10:
                 pos = np.clip(mu.values, a_min=0.0, a_max=None)
                 neg = np.clip(-mu.values, a_min=0.0, a_max=None)
