@@ -27,7 +27,6 @@ class AlphaPredictor:
     def _precompute_all_features(self):
         """Pre-compute ALL features for ALL tickers using vectorized operations."""
         
-        # === TECHNICAL FEATURES (vectorized per ticker) ===
         if not self.price_data.empty and "ticker" in self.price_data.columns:
             for ticker in self.price_data["ticker"].unique():
                 px = self.price_data[self.price_data["ticker"] == ticker].copy()
@@ -36,7 +35,6 @@ class AlphaPredictor:
                     
                 px = px.sort_values("date").set_index("date")
                 
-                # Ensure we have returns
                 if "returns" not in px.columns:
                     if "adjClose" in px.columns:
                         px["returns"] = np.log(px["adjClose"]).diff()
@@ -56,22 +54,18 @@ class AlphaPredictor:
                 
                 self._technical_cache[ticker] = tech_df
         
-        # === FUNDAMENTAL FEATURES (pre-process per ticker) ===
         bs = self.fundamentals.get("balance_sheet", pd.DataFrame())
         inc = self.fundamentals.get("income_statement", pd.DataFrame())
         cf = self.fundamentals.get("cash_flow", pd.DataFrame())
         
-        # Get all unique tickers from fundamentals
         all_tickers = set()
         for df in [bs, inc, cf]:
             if not df.empty and "ticker" in df.columns:
                 all_tickers.update(df["ticker"].unique())
         
         for ticker in all_tickers:
-            # Get latest fundamental data for this ticker
             fund_data = {}
             
-            # Balance sheet
             if not bs.empty and "ticker" in bs.columns and "date" in bs.columns:
                 tk_bs = bs[bs["ticker"] == ticker].copy()
                 if not tk_bs.empty:
@@ -83,7 +77,6 @@ class AlphaPredictor:
                             if col in latest.index and pd.notna(latest[col]):
                                 fund_data[col] = float(latest[col])
             
-            # Income statement
             if not inc.empty and "ticker" in inc.columns and "date" in inc.columns:
                 tk_inc = inc[inc["ticker"] == ticker].copy()
                 if not tk_inc.empty:
@@ -95,7 +88,6 @@ class AlphaPredictor:
                             if col in latest.index and pd.notna(latest[col]):
                                 fund_data[col] = float(latest[col])
             
-            # Cash flow
             if not cf.empty and "ticker" in cf.columns and "date" in cf.columns:
                 tk_cf = cf[cf["ticker"] == ticker].copy()
                 if not tk_cf.empty:
@@ -121,7 +113,6 @@ class AlphaPredictor:
         gross_profit = fund_data.get("grossProfit")
         fcf = fund_data.get("freeCashFlow")
         
-        # Compute ratios safely
         if net_income is not None and total_equity is not None and total_equity != 0:
             feats["roe"] = net_income / total_equity
         else:
@@ -175,7 +166,6 @@ class AlphaPredictor:
             
         px = px.sort_values("date")
         
-        # Ensure we have returns
         if "returns" not in px.columns:
             if "adjClose" in px.columns:
                 px["returns"] = np.log(px["adjClose"]).diff()
@@ -184,10 +174,8 @@ class AlphaPredictor:
             else:
                 return False
         
-        # Compute forward returns (target variable)
         px["fwd_ret"] = px["returns"].rolling(self.horizon).sum().shift(-self.horizon)
         
-        # Limit to lookback period
         end_date = px["date"].max()
         start_date = end_date - pd.Timedelta(days=int(self.lookback * 1.5))
         px = px[(px["date"] >= start_date) & (px["date"] <= end_date)].copy()
@@ -195,29 +183,22 @@ class AlphaPredictor:
         if len(px) < 60:
             return False
         
-        # Get pre-computed technical features
         tech_feats = self._technical_cache.get(ticker)
         if tech_feats is None or tech_feats.empty:
             return False
         
-        # Get pre-computed fundamental ratios
         fund_data = self._fundamental_cache.get(ticker, {})
         fund_ratios = self._compute_fundamental_ratios(fund_data)
         
-        # Build feature matrix - USE VECTORIZED MERGE, NOT LOOP
         px_indexed = px.set_index("date")
         
-        # Align technical features with price data
         X = tech_feats.reindex(px_indexed.index)
         
-        # Add fundamental features (constant across all dates for simplicity)
         for feat_name, feat_val in fund_ratios.items():
             X[feat_name] = feat_val
         
-        # Target
         y = px_indexed["fwd_ret"]
         
-        # Combine and drop NaN
         combined = pd.concat([y.rename("target"), X], axis=1).dropna()
         
         if len(combined) < 50:
@@ -226,7 +207,6 @@ class AlphaPredictor:
         y_train = combined["target"].values
         X_train = combined.drop(columns=["target"])
         
-        # Remove columns with no variance or all NaN
         valid_cols = []
         for col in X_train.columns:
             col_data = X_train[col]
@@ -239,12 +219,10 @@ class AlphaPredictor:
         
         X_train = X_train[valid_cols].fillna(X_train[valid_cols].median())
         
-        # Scale and fit model
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X_train)
         
         try:
-            # Use fast settings: fewer alphas, fewer CV folds
             model = LassoCV(cv=3, random_state=42, n_alphas=10, max_iter=2000)
             model.fit(X_scaled, y_train)
         except Exception:
@@ -264,12 +242,10 @@ class AlphaPredictor:
         if horizon is None:
             horizon = self.horizon
         
-        # Get fundamental ratios for scoring
         fund_data = self._fundamental_cache.get(ticker, {})
         fund_ratios = self._compute_fundamental_ratios(fund_data)
         score = self._fundamental_score(fund_ratios)
         
-        # Try to train if we don't have a model
         if ticker not in self.models:
             if not self.train_ticker(ticker):
                 # Return fallback prediction based on fundamentals only
@@ -286,7 +262,6 @@ class AlphaPredictor:
                     }
                 }
         
-        # Double-check we have a model
         if ticker not in self.models:
             exp = 0.002 * score
             return {
@@ -301,7 +276,6 @@ class AlphaPredictor:
                 }
             }
         
-        # Get latest features for prediction
         cols = self._features_used.get(ticker, [])
         if not cols:
             exp = 0.002 * score
@@ -317,17 +291,14 @@ class AlphaPredictor:
                 }
             }
         
-        # Build feature vector for latest date
         tech_feats = self._technical_cache.get(ticker)
         if tech_feats is not None and not tech_feats.empty:
             latest_tech = tech_feats.iloc[-1].to_dict()
         else:
             latest_tech = {}
         
-        # Combine with fundamentals
         all_feats = {**latest_tech, **fund_ratios}
         
-        # Create feature vector in correct order
         x = pd.DataFrame([all_feats]).reindex(columns=cols).fillna(0)
         
         try:
@@ -338,7 +309,6 @@ class AlphaPredictor:
         except Exception:
             pred = 0.002 * score
         
-        # Get feature importances
         coefs = getattr(self.models.get(ticker), "coef_", np.zeros(len(cols)))
         imp = pd.DataFrame({
             "feature": cols,
