@@ -19,7 +19,6 @@ class AlphaPredictor:
         self.scalers = {}
         self._features_used = {}
         
-        # Pre-compute all technical features ONCE (vectorized) - this is the key optimization
         self._technical_cache = {}
         self._fundamental_cache = {}
         self._precompute_all_features()
