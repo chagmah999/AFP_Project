@@ -7,8 +7,8 @@ FMP_STABLE_BASE = "https://financialmodelingprep.com/stable"
 FMP_V4_BASE = "https://financialmodelingprep.com/api/v4"
 
 DEFAULT_START_DATE = "2022-01-01"
-LOOKBACK_DAYS = 126        # 6 months
-FORECAST_HORIZON_DAYS = 21 # ~1 month
+LOOKBACK_DAYS = 126        
+FORECAST_HORIZON_DAYS = 21 
 
 DEFAULT_UNIVERSE_SIZE = 50
 MAX_UNIVERSE_SIZE = 509
