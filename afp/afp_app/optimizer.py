@@ -147,7 +147,7 @@ class UnifiedPortfolioOptimizer:
             scores = mu.values / np.sqrt(diag)
             scores = np.clip(scores, a_min=0.0, a_max=None)
             if scores.sum() <= 0:
-                # Fallback: equal weight the top half by alpha
+                
                 scores = mu.values - mu.values.min() + 1e-6
                 scores = np.clip(scores, a_min=0.0, a_max=None)
             if scores.sum() <= 0:
