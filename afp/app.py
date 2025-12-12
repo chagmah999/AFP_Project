@@ -591,11 +591,9 @@ if run_btn:
     st.session_state["base_forecasts"] = forecasts
     st.session_state["base_factor_eval"] = factor_eval
 
-    # --- START REPLACEMENT CODE (lines 594-660) ---
 
     status.info("Predicting per-ticker alpha (this may take a few minutes for large universes)...")
     
-    # Create alpha model - pre-computation happens here
     alpha_model = AlphaPredictor(
         factor_returns,
         fundamentals,
@@ -627,7 +625,6 @@ if run_btn:
     progress_bar.progress(1.0, text="Alpha predictions complete!")
     st.session_state["base_alpha"] = alpha_preds
     
-    # Diagnostic info
     if not alpha_preds:
         st.warning(f"No alpha predictions could be generated for any of the {len(tickers)} tickers. "
                    "This may indicate insufficient price or fundamental data.")
@@ -657,7 +654,6 @@ if run_btn:
                 lookback_days=252,
             )
 
-            # Better fallback logic when covariance fails
             if Sigma is None or Sigma.empty or len(valid_tickers) < 2:
                 # Try optimization without covariance matrix (alpha-only)
                 st.info("Covariance matrix unavailable - using alpha-only optimization")
@@ -674,7 +670,6 @@ if run_btn:
             else:
                 common = [tk for tk in valid_tickers if tk in mu.index]
                 if len(common) < 2:
-                    # Fallback to alpha-only optimization
                     st.info("Insufficient common tickers - using alpha-only optimization")
                     weights = optimizer.optimize(mu=mu, Sigma=pd.DataFrame())
                     
@@ -705,7 +700,6 @@ if run_btn:
         st.session_state["optimized_portfolio"] = None
         st.warning(f"Error constructing optimized portfolio: {e}")
 
-# --- END REPLACEMENT CODE ---
     t1 = time.time()
     st.success(f"Pipeline completed in {t1 - t0:.1f} seconds.")
 
@@ -775,10 +769,8 @@ else:
                     "long short portfolio over time."
                 )
             
-                # Convert cumulative returns to a wealth index and clip at a small positive floor
                 wealth_paths = (1.0 + cum_paths).clip(lower=1e-6)
             
-                # Reset index and detect the date column name robustly
                 df_wealth = wealth_paths.reset_index()
                 date_col = df_wealth.columns[0]
             
